@@ -31,6 +31,7 @@ const (
 	ShutDown
 	ReduceWork
 	MapWork
+	GetNumReduce
 )
 
 type Work struct{

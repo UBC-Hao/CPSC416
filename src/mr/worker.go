@@ -6,6 +6,9 @@ import (
 	"log"
 	"net/rpc"
 	"time"
+	"os"
+	"encoding/json"
+	"io/ioutil"
 )
 
 // Map functions return a slice of KeyValue.
@@ -22,6 +25,49 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int) (error){
+	filename := work.filename
+	file, err := os.Open(filename)
+	defer file.Close()
+	if err != nil{
+		return err
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil{
+		return err
+	}
+	kva := mapf(filename, string(content))
+	
+	kva_a := make([][]KeyValue, nReduce)
+	id:= work.ID
+	for i:=0;i<nReduce;i++{
+		kva_a[i] = make([]KeyValue, 0)
+	}
+	// create multiple files for reduce task, mr-id-0 to mr-id-(nReduce-1)
+	for _,keyvalue := range(kva){
+		tnum := ihash(keyvalue.Key) % nReduce
+		kva_a[tnum] = append(kva_a[tnum], keyvalue)
+	}
+
+	//write out files
+	for i:=0;i<nReduce;i++{
+		json,err:=json.Marshal(kva_a[i])
+		if err != nil{
+			return err
+		}
+		f,err := os.Create(fmt.Sprintf("mr-%d-%d", id, i))
+		if err != nil{
+			return err
+		}
+		f.Write(json)
+		f.Close()
+	}
+
+	return nil
+}
+
+
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
@@ -30,11 +76,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		//request work every 1 second
 		time.Sleep(time.Second)
+		nReduce := getNumReduce()
 		ok, work :=requestWork()
 		if !ok{ continue;} // no work to do right now, continue
 		if work.Type==MapWork{
 			//MapWork
-
+			err := handleMapWork(mapf, work, nReduce)
+			if err != nil{
+				fmt.Printf("Error when reading the file, absort current workload\n")
+				continue
+			}
+			//tell the coordinator, I'm done!
+			finishWork(work)
 		}else{
 			//ReduceWork
 
@@ -43,6 +96,26 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
+
+func getNumReduce() int{
+	send := Packet{Type: GetNumReduce}
+	ret := Packet{}
+	ok := call("Coordinator.SendRequest", &send, &ret)
+	if ok == false{
+		fmt.Printf("Call Failed \n")
+	}
+	return ret.Msg0
+}
+
+func finishWork(work *Work)  {
+	send := Packet{Type: FinishedWork, Msg0: work.ID}
+	ret	 := Packet{}
+	ok	 := call("Coordinator.SendRequest", &send, &ret)
+	if ok == false{
+		fmt.Printf("Call Failed \n")
+	}
+	return
+}
 
 func requestWork() (bool, *Work) {
 	send := Packet{Type: RequestWork}

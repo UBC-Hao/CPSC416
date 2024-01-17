@@ -1,17 +1,22 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
-	"sync"
 	"os"
+	"sync"
 	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
+
+
+	// number of reduce tasks, no changes to nReduce, no need for mutex
+	nReduce int
 
 	// Boolean to indicate all jobs done, no need for atmoic read
 	AllDone bool 
@@ -34,6 +39,8 @@ type Coordinator struct {
 func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 	// handle the request
 	switch request.Type{
+		case GetNumReduce:
+			reply.Msg0 = c.nReduce
 		case RequestWork:
 			select{
 				case work := <- c.workload:
@@ -99,6 +106,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		workload: make(chan *Work, maxWorkLoad),
 		timestamps: make([]*time.Time,maxWorkLoad),
 		finished: make([]bool, maxWorkLoad),
+		nReduce: nReduce,
 	}
 
 	// handout workload to workers
@@ -134,7 +142,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.mu.RUnlock()
 		if allDone { break }
 	}
-
+	fmt.Printf("Successfully handled map workload ! \n")
 	//reset finished to all False
 	
 	
