@@ -1,8 +1,8 @@
 package mr
 
 import (
-	"fmt"
-	"log"
+	//"fmt"
+	//"log"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -54,7 +54,7 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 					tnow := time.Now()
 					c.timestamps[work.ID] = &tnow
 					c.mu.Unlock()
-					fmt.Printf("Workload %d handout !\n", work.ID)
+					//fmt.Printf("Workload %d handout !\n", work.ID)
 				default:
 					//no work to do rightnow
 					reply.Type = Failed
@@ -65,9 +65,9 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 			c.finished[id] = true
 			c.timestamps[id] = nil
 			c.mu.Unlock()
-			fmt.Printf("Workload %d finished !\n", id)
+			//fmt.Printf("Workload %d finished !\n", id)
 		default:
-			fmt.Println("Unhandled workload !")
+			//fmt.Println("Unhandled workload !")
 	}
 	return nil
 }
@@ -89,7 +89,7 @@ func (c *Coordinator) server() {
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
-		log.Fatal("listen error:", e)
+		//log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
 }
@@ -123,7 +123,7 @@ func handleFailureWork(s int, e int, files []string, workType int, c *Coordinato
 					}
 					c.timestamps[i] = nil
 					c.workload <- work
-					fmt.Printf("Workload timeout, reschedule %d \n", i)
+					//fmt.Printf("Workload timeout, reschedule %d \n", i)
 				}
 			}
 		}
@@ -149,7 +149,7 @@ func handleCoordinator(files []string, nReduce int, c *Coordinator){
 	// check if all the work is finished, if not, resend the workload
 	handleFailureWork(0, lenfiles, files, MapWork, c)
 	
-	fmt.Printf("Successfully handled map workload ! \n")
+	//fmt.Printf("Successfully handled map workload ! \n")
 	//note some map workload might still join finished workload array, so we will use nMap: nMap + nReduce
 	for j:=0;j<nReduce;j++{
 		i := j + c.nMap

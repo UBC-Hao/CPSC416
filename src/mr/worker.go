@@ -81,14 +81,14 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 	for i:=0;i<nMap;i++{
 		file,err := os.Open(fmt.Sprintf("mr-%d-%d",i,reduce_id))
 		if err!=nil{
-			fmt.Print("Error when trying to read the file")
+			//fmt.Print("Error when trying to read the file")
 			return 
 		}
 		var kva []KeyValue
 		content, _ := ioutil.ReadAll(file)
 		err = json.Unmarshal(content, &kva)
 		if err!=nil{
-			fmt.Print("Error when unmarshalling the file")
+			//fmt.Print("Error when unmarshalling the file")
 			return 
 		}
 		intermediate = append(intermediate,kva... )
@@ -136,7 +136,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			//MapWork
 			err := handleMapWork(mapf, work, nReduce)
 			if err != nil{
-				fmt.Printf("Error when reading the file, absort current workload\n")
+				//fmt.Printf("Error when reading the file, absort current workload\n")
 				continue
 			}
 			//tell the coordinator, I'm done!
@@ -157,7 +157,7 @@ func getNumMap() int{
 	ret := Packet{}
 	ok := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
-		fmt.Printf("Call Failed \n")
+		//fmt.Printf("Call Failed \n")
 	}
 	return ret.Msg0
 }
@@ -167,7 +167,7 @@ func getNumReduce() int{
 	ret := Packet{}
 	ok := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
-		fmt.Printf("Call Failed \n")
+		//fmt.Printf("Call Failed \n")
 	}
 	return ret.Msg0
 }
@@ -177,7 +177,7 @@ func finishWork(work *Work)  {
 	ret	 := Packet{}
 	ok	 := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
-		fmt.Printf("Call Failed \n")
+		//fmt.Printf("Call Failed \n")
 	}
 	return
 }
@@ -187,7 +187,7 @@ func requestWork() (bool, *Work) {
 	ret	 := Packet{}
 	ok	 := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
-		fmt.Printf("Call Failed \n")
+		//fmt.Printf("Call Failed \n")
 	}
 	success := ret.Type!=Failed
 	work := &Work{}
@@ -221,9 +221,9 @@ func CallExample() {
 	ok := call("Coordinator.Example", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
+		//fmt.Printf("reply.Y %v\n", reply.Y)
 	} else {
-		fmt.Printf("call failed!\n")
+		//fmt.Printf("call failed!\n")
 	}
 }
 
@@ -235,7 +235,8 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		//log.Fatal("dialing:", err)
+		return false
 	}
 	defer c.Close()
 
@@ -244,6 +245,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	//fmt.Println(err)
 	return false
 }
