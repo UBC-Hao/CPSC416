@@ -98,6 +98,7 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 	sort.Sort(ByKey(intermediate))
 	oname := fmt.Sprintf("mr-out-%d", reduce_id)
 	ofile, _ := os.Create(oname)
+	defer ofile.Close()
 
 	//
 	// call Reduce on each distinct key in intermediate[],
