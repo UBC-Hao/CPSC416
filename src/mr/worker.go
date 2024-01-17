@@ -3,7 +3,7 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
-	"log"
+	//"log"
 	"sort"
 	"net/rpc"
 
