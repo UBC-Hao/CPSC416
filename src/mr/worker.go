@@ -26,10 +26,27 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
+		//constantly request work
+
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
+}
+
+
+func requestWork() (bool, *Packet) {
+	send := Packet{Type: RequestWork}
+	ret	 := Packet{}
+	ok	 := call("Coordinator.SendRequest", &send, &ret)
+	if ok == false{
+		fmt.Printf("Call Failed \n")
+	}
+	success := ret.Type!=Failed
+
+	return success,&ret
 }
 
 // example function to show how to make an RPC call to the coordinator.
