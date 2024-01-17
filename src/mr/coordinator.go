@@ -17,6 +17,7 @@ type Coordinator struct {
 
 	// number of reduce tasks, no changes to nReduce, no need for mutex
 	nReduce int
+	nMap int
 
 	// Boolean to indicate all jobs done, no need for atmoic read
 	AllDone bool 
@@ -51,6 +52,7 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 					tnow := time.Now()
 					c.timestamps[work.ID] = &tnow
 					c.mu.Unlock()
+					fmt.Printf("Workload %d handout !\n", work.ID)
 				default:
 					//no work to do rightnow
 					reply.Type = Failed
@@ -61,6 +63,7 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 			c.finished[id] = true
 			c.timestamps[id] = nil
 			c.mu.Unlock()
+			fmt.Printf("Workload %d finished !\n", id)
 	}
 	return nil
 }
@@ -96,6 +99,35 @@ func (c *Coordinator) Done() bool {
 	return ret
 }
 
+
+func handleFailureWork(s int, e int, files []string, workType int, c *Coordinator) {
+	for {
+		time.Sleep(time.Second)
+		c.mu.Lock()
+		allDone:=true
+		for i:=s;i<e;i++{
+			if c.finished[i] == false{
+				allDone = false
+				if c.timestamps[i] != nil && time.Now().After(c.timestamps[i].Add(10*time.Second)){
+					// timeout, reschedule the taks
+					work := &Work{
+						Type: workType,
+						ID: i,
+					}
+					if files != nil{
+						work.filename =  files[i]
+					}
+					c.timestamps[i] = nil
+					c.workload <- work
+					fmt.Printf("Workload timeout, reschedule %d \n", i)
+				}
+			}
+		}
+		c.mu.Unlock()
+		if allDone { break }
+	}
+}
+
 //executes coordinator goroutine here
 func handleCoordinator(files []string, nReduce int, c *Coordinator){
 	lenfiles := len(files)
@@ -111,30 +143,21 @@ func handleCoordinator(files []string, nReduce int, c *Coordinator){
 	}
 
 	// check if all the work is finished, if not, resend the workload
-	for {
-		time.Sleep(time.Second)
-		c.mu.Lock()
-		allDone:=true
-		for i:=0;i<lenfiles;i++{
-			if c.finished[i] == false{
-				allDone = false
-				if c.timestamps[i] != nil && time.Now().After(c.timestamps[i].Add(10*time.Second)){
-					// timeout, reschedule the taks
-					work := &Work{
-						Type: MapWork,
-						ID: i,
-						filename: files[i],
-					}
-					c.timestamps[i] = nil
-					c.workload <- work
-				}
-			}
-		}
-		c.mu.Unlock()
-		if allDone { break }
-	}
+	handleFailureWork(0, lenfiles, files, MapWork, c)
+	
 	fmt.Printf("Successfully handled map workload ! \n")
-	//reset finished to all False
+	//note some map workload might still join finished workload array, so we will use nMap: nMap + nReduce
+	for j:=0;j<nReduce;j++{
+		i := j + c.nMap
+		work := &Work{
+			Type: ReduceWork,
+			ID: i, 
+		}
+		c.workload <- work
+	}
+
+	handleFailureWork(lenfiles, lenfiles + nReduce, nil, ReduceWork, c)
+	
 }
 
 // create a Coordinator.
@@ -148,6 +171,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		timestamps: make([]*time.Time,maxWorkLoad),
 		finished: make([]bool, maxWorkLoad),
 		nReduce: nReduce,
+		nMap: lenfiles,
 	}
 	
 	c.server()

@@ -32,6 +32,7 @@ const (
 	ReduceWork
 	MapWork
 	GetNumReduce
+	GetNumMap
 )
 
 type Work struct{

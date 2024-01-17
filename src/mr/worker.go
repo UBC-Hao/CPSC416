@@ -64,12 +64,16 @@ func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int
 }
 
 
+
+
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	// Your worker implementation here.
 	for {
 		//request work every 1 second
+		nMap := getNumMap()
 		nReduce := getNumReduce()
 		ok, work :=requestWork()
 		if !ok{ continue;} // no work to do right now, continue
@@ -90,6 +94,17 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
+
+
+func getNumMap() int{
+	send := Packet{Type: GetNumMap}
+	ret := Packet{}
+	ok := call("Coordinator.SendRequest", &send, &ret)
+	if ok == false{
+		fmt.Printf("Call Failed \n")
+	}
+	return ret.Msg0
+}
 
 func getNumReduce() int{
 	send := Packet{Type: GetNumReduce}
