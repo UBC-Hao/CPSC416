@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"sort"
 	"net/rpc"
 
 	"encoding/json"
@@ -16,6 +17,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -63,9 +72,55 @@ func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int
 	return nil
 }
 
+func handleReduceWork(reducef func(string, []string) string, work *Work, nMap int){
+	j := work.ID
+	reduce_id := j - nMap //reduce id , not the work id
+	// this reduce task will tackle mr-0-reduce_id,...,mr-(nMap-1)-reduce_id
+	// first, we read all the files and append to a big kva
+	intermediate := make([]KeyValue, 0)
+	for i:=0;i<nMap;i++{
+		file,err := os.Open(fmt.Sprintf("mr-%d-%d",i,reduce_id))
+		if err!=nil{
+			fmt.Print("Error when trying to read the file")
+			return 
+		}
+		var kva []KeyValue
+		content, _ := ioutil.ReadAll(file)
+		err = json.Unmarshal(content, &kva)
+		if err!=nil{
+			fmt.Print("Error when unmarshalling the file")
+			return 
+		}
+		intermediate = append(intermediate,kva... )
+		file.Close()
+	}
+	//below, copied from mrsequential
+	sort.Sort(ByKey(intermediate))
+	oname := fmt.Sprintf("mr-out-%d", reduce_id)
+	ofile, _ := os.Create(oname)
 
+	//
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-0.
+	//
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
 
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
 
+		i = j
+	}
+}
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
@@ -88,7 +143,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			finishWork(work)
 		}else{
 			//ReduceWork
-
+			handleReduceWork(reducef, work, nMap)
+			finishWork(work)
 		}
 	}
 
