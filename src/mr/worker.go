@@ -5,10 +5,10 @@ import (
 	"hash/fnv"
 	"log"
 	"net/rpc"
-	"time"
-	"os"
+
 	"encoding/json"
 	"io/ioutil"
+	"os"
 )
 
 // Map functions return a slice of KeyValue.
@@ -55,10 +55,7 @@ func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int
 		if err != nil{
 			return err
 		}
-		f,err := os.Create(fmt.Sprintf("mr-%d-%d", id, i))
-		if err != nil{
-			return err
-		}
+		f,_ := os.Create(fmt.Sprintf("mr-%d-%d", id, i))
 		f.Write(json)
 		f.Close()
 	}
@@ -67,15 +64,12 @@ func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int
 }
 
 
-
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
 	// Your worker implementation here.
 	for {
 		//request work every 1 second
-		time.Sleep(time.Second)
 		nReduce := getNumReduce()
 		ok, work :=requestWork()
 		if !ok{ continue;} // no work to do right now, continue

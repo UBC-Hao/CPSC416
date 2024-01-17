@@ -96,19 +96,9 @@ func (c *Coordinator) Done() bool {
 	return ret
 }
 
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
+//executes coordinator goroutine here
+func handleCoordinator(files []string, nReduce int, c *Coordinator){
 	lenfiles := len(files)
-	maxWorkLoad := nReduce + lenfiles + 3
-	c := Coordinator{
-		workload: make(chan *Work, maxWorkLoad),
-		timestamps: make([]*time.Time,maxWorkLoad),
-		finished: make([]bool, maxWorkLoad),
-		nReduce: nReduce,
-	}
-
 	// handout workload to workers
 	for i:=0;i<lenfiles;i++{
 		filename := files[i]
@@ -123,7 +113,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// check if all the work is finished, if not, resend the workload
 	for {
 		time.Sleep(time.Second)
-		c.mu.RLock()
+		c.mu.Lock()
 		allDone:=true
 		for i:=0;i<lenfiles;i++{
 			if c.finished[i] == false{
@@ -135,18 +125,32 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 						ID: i,
 						filename: files[i],
 					}
+					c.timestamps[i] = nil
 					c.workload <- work
 				}
 			}
 		}
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		if allDone { break }
 	}
 	fmt.Printf("Successfully handled map workload ! \n")
 	//reset finished to all False
-	
-	
+}
 
+// create a Coordinator.
+// main/mrcoordinator.go calls this function.
+// nReduce is the number of reduce tasks to use.
+func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	lenfiles := len(files)
+	maxWorkLoad := nReduce + lenfiles + 3
+	c := Coordinator{
+		workload: make(chan *Work, maxWorkLoad),
+		timestamps: make([]*time.Time,maxWorkLoad),
+		finished: make([]bool, maxWorkLoad),
+		nReduce: nReduce,
+	}
+	
 	c.server()
+	go handleCoordinator(files, nReduce, &c)
 	return &c
 }
