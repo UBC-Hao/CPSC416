@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net/rpc"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -27,17 +28,23 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	for {
-		//constantly request work
+		//request work every 1 second
+		time.Sleep(time.Second)
+		ok, work :=requestWork()
+		if !ok{ continue;} // no work to do right now, continue
+		if work.Type==MapWork{
+			//MapWork
 
+		}else{
+			//ReduceWork
+
+		}
 	}
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
 
 }
 
 
-func requestWork() (bool, *Packet) {
+func requestWork() (bool, *Work) {
 	send := Packet{Type: RequestWork}
 	ret	 := Packet{}
 	ok	 := call("Coordinator.SendRequest", &send, &ret)
@@ -45,8 +52,14 @@ func requestWork() (bool, *Packet) {
 		fmt.Printf("Call Failed \n")
 	}
 	success := ret.Type!=Failed
+	work := &Work{}
+	if success{
+		work.Type = ret.Type
+		work.ID = ret.Msg0
+		work.filename = ret.Msg1
+	}
 
-	return success,&ret
+	return success,work
 }
 
 // example function to show how to make an RPC call to the coordinator.

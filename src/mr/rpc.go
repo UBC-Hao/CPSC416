@@ -26,6 +26,7 @@ type ExampleReply struct {
 
 const (
 	RequestWork int = iota
+	FinishedWork
 	Failed
 	ShutDown
 	ReduceWork

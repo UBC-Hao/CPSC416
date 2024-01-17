@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"sync"
 	"os"
+	"time"
 )
 
 type Coordinator struct {
@@ -17,6 +18,10 @@ type Coordinator struct {
 
 	// channels to hand out work
 	workload chan *Work
+
+	// works array to record work history
+	timestamps []*time.Time
+	finished []bool
 
 	//mutex for reading parameters in Coordinator
 	mu sync.RWMutex
@@ -35,10 +40,20 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 					reply.Type = work.Type
 					reply.Msg0 = work.ID
 					reply.Msg1 = work.filename
+					c.mu.Lock()
+					tnow := time.Now()
+					c.timestamps[work.ID] = &tnow
+					c.mu.Unlock()
 				default:
-					//no work to do
+					//no work to do rightnow
 					reply.Type = Failed
 			}
+		case FinishedWork:
+			id := request.Msg0
+			c.mu.Lock()
+			c.finished[id] = true
+			c.timestamps[id] = nil
+			c.mu.Unlock()
 	}
 	return nil
 }
@@ -78,12 +93,51 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	maxWorkLoad := nReduce + len(files) + 3
+	lenfiles := len(files)
+	maxWorkLoad := nReduce + lenfiles + 3
 	c := Coordinator{
 		workload: make(chan *Work, maxWorkLoad),
+		timestamps: make([]*time.Time,maxWorkLoad),
+		finished: make([]bool, maxWorkLoad),
 	}
 
-	// Your code here.
+	// handout workload to workers
+	for i:=0;i<lenfiles;i++{
+		filename := files[i]
+		work := &Work{
+			Type: MapWork,
+			ID: i,
+			filename: filename,
+		}
+		c.workload <- work
+	}
+
+	// check if all the work is finished, if not, resend the workload
+	for {
+		time.Sleep(time.Second)
+		c.mu.RLock()
+		allDone:=true
+		for i:=0;i<lenfiles;i++{
+			if c.finished[i] == false{
+				allDone = false
+				if c.timestamps[i] != nil && time.Now().After(c.timestamps[i].Add(10*time.Second)){
+					// timeout, reschedule the taks
+					work := &Work{
+						Type: MapWork,
+						ID: i,
+						filename: files[i],
+					}
+					c.workload <- work
+				}
+			}
+		}
+		c.mu.RUnlock()
+		if allDone { break }
+	}
+
+	//reset finished to all False
+	
+	
 
 	c.server()
 	return &c
