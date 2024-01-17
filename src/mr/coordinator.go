@@ -40,6 +40,8 @@ type Coordinator struct {
 func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 	// handle the request
 	switch request.Type{
+		case GetNumMap:
+			reply.Msg0 = c.nMap
 		case GetNumReduce:
 			reply.Msg0 = c.nReduce
 		case RequestWork:
@@ -64,6 +66,8 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error{
 			c.timestamps[id] = nil
 			c.mu.Unlock()
 			fmt.Printf("Workload %d finished !\n", id)
+		default:
+			fmt.Println("Unhandled workload !")
 	}
 	return nil
 }
@@ -157,7 +161,9 @@ func handleCoordinator(files []string, nReduce int, c *Coordinator){
 	}
 
 	handleFailureWork(lenfiles, lenfiles + nReduce, nil, ReduceWork, c)
-	
+	c.mu.Lock()
+	c.AllDone = true
+	c.mu.Unlock()
 }
 
 // create a Coordinator.
