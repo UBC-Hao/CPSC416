@@ -3,9 +3,11 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"log"
+
 	//"log"
-	"sort"
 	"net/rpc"
+	"sort"
 
 	"encoding/json"
 	"io/ioutil"
@@ -64,10 +66,10 @@ func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int
 		if err != nil{
 			return err
 		}
-		f,_ := os.Create(fmt.Sprintf("mr-%d-%d", id, i))
+		f,_ := ioutil.TempFile(".","tmpfile")
 		f.Write(json)
-		f.Sync()
 		f.Close()
+		os.Rename(f.Name(), fmt.Sprintf("mr-%d-%d", id, i))
 	}
 
 	return nil
@@ -99,8 +101,8 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 	//below, copied from mrsequential
 	sort.Sort(ByKey(intermediate))
 	oname := fmt.Sprintf("mr-out-%d", reduce_id)
-	ofile, _ := os.Create(oname)
-	defer ofile.Close()
+	ofile, _ := ioutil.TempFile(".","tmp"+oname)
+	
 
 	//
 	// call Reduce on each distinct key in intermediate[],
@@ -122,7 +124,10 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 
 		i = j
 	}
-	ofile.Sync()
+	ofile.Close()
+	if err := os.Rename(ofile.Name(), oname); err != nil{
+		log.Fatal(err)
+	}
 }
 
 // main/mrworker.go calls this function.

@@ -140,6 +140,7 @@ else
   echo '---' indexer test: FAIL
   failed_any=1
 fi
+sleep 1
 
 wait
 
