@@ -66,6 +66,7 @@ func handleMapWork(mapf func(string, string) []KeyValue, work *Work, nReduce int
 		}
 		f,_ := os.Create(fmt.Sprintf("mr-%d-%d", id, i))
 		f.Write(json)
+		f.Sync()
 		f.Close()
 	}
 
@@ -80,6 +81,7 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 	intermediate := make([]KeyValue, 0)
 	for i:=0;i<nMap;i++{
 		file,err := os.Open(fmt.Sprintf("mr-%d-%d",i,reduce_id))
+		defer file.Close()
 		if err!=nil{
 			//fmt.Print("Error when trying to read the file")
 			return 
@@ -92,7 +94,7 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 			return 
 		}
 		intermediate = append(intermediate,kva... )
-		file.Close()
+		file.Sync()
 	}
 	//below, copied from mrsequential
 	sort.Sort(ByKey(intermediate))
@@ -115,12 +117,12 @@ func handleReduceWork(reducef func(string, []string) string, work *Work, nMap in
 			values = append(values, intermediate[k].Value)
 		}
 		output := reducef(intermediate[i].Key, values)
-
 		// this is the correct format for each line of Reduce output.
 		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
 
 		i = j
 	}
+	ofile.Sync()
 }
 
 // main/mrworker.go calls this function.
@@ -142,7 +144,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			//tell the coordinator, I'm done!
 			finishWork(work)
-		}else{
+		}else if work.Type==ReduceWork{
 			//ReduceWork
 			handleReduceWork(reducef, work, nMap)
 			finishWork(work)
@@ -158,6 +160,7 @@ func getNumMap() int{
 	ret := Packet{}
 	ok := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
+		os.Exit(0)
 		//fmt.Printf("Call Failed \n")
 	}
 	return ret.Msg0
@@ -168,6 +171,7 @@ func getNumReduce() int{
 	ret := Packet{}
 	ok := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
+		os.Exit(0)
 		//fmt.Printf("Call Failed \n")
 	}
 	return ret.Msg0
@@ -179,6 +183,7 @@ func finishWork(work *Work)  {
 	ok	 := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
 		//fmt.Printf("Call Failed \n")
+		os.Exit(0)
 	}
 	return
 }
@@ -189,6 +194,8 @@ func requestWork() (bool, *Work) {
 	ok	 := call("Coordinator.SendRequest", &send, &ret)
 	if ok == false{
 		//fmt.Printf("Call Failed \n")
+		os.Exit(0)
+		return false, nil
 	}
 	success := ret.Type!=Failed
 	work := &Work{}
