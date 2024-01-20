@@ -35,17 +35,17 @@ const (
 	GetNumMap
 )
 
-type Work struct{
-	Type int
-	ID int
+type Work struct {
+	Type     int
+	ID       int
 	filename string
 }
 
-type Packet struct{
-	Type int	// packet type
-	Msg0 int	// msg0 in this packet
-	Msg1 string	// msg1 in this packet
-	Msg2 string	// msg2 in this packet
+type Packet struct {
+	Type int    // packet type
+	Msg0 int    // msg0 in this packet
+	Msg1 string // msg1 in this packet
+	Msg2 string // msg2 in this packet
 }
 
 // Add your RPC definitions here.
