@@ -30,7 +30,6 @@ type Coordinator struct {
 
 	//mutex for reading parameters in Coordinator
 	mu sync.RWMutex
-	cond sync.Cond
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -63,8 +62,6 @@ func (c *Coordinator) SendRequest(request *Packet, reply *Packet) error {
 		c.mu.Lock()
 		c.finished[id] = true
 		c.timestamps[id] = nil
-		//use of condition varible to notify the checker
-		c.cond.Signal()
 		c.mu.Unlock()
 		//fmt.Printf("Workload %d finished !\n", id)
 	default:
@@ -105,9 +102,9 @@ func (c *Coordinator) Done() bool {
 }
 
 func handleFailureWork(s int, e int, files []string, workType int, c *Coordinator) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	for {
+		time.Sleep(300 * time.Millisecond)
+		c.mu.Lock()
 		allDone := true
 		for i := s; i < e; i++ {
 			if c.finished[i] == false {
@@ -127,10 +124,11 @@ func handleFailureWork(s int, e int, files []string, workType int, c *Coordinato
 				}
 			}
 		}
-		c.cond.Wait()
+		c.mu.Unlock()
 		if allDone {
 			break
 		}
+
 	}
 }
 
@@ -181,7 +179,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		nReduce:    nReduce,
 		nMap:       lenfiles,
 	}
-	c.cond = *sync.NewCond(&c.mu)
 
 	c.server()
 	go handleCoordinator(files, nReduce, &c)
