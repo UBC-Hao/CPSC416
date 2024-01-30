@@ -33,9 +33,11 @@ build-mr:
 lab1: build-mrapps build-mr
 	@echo "-- lab1 built successfully"
 
+lab2: 
+	@echo "-- skipping the build phase for lab2a"
+
 tar: $(lab_name)
-	@echo $(lab_name)
-	@echo $(student_id)
+	@echo "preparing a tar for $(lab_name) for student $(student_id)"
 	
 	tar \
 	--exclude=src/main/*.txt \
