@@ -171,7 +171,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = true
 		//also change last recv
-		rf.lastHB = time.Now()
+		rf.resetTimer()
 		DPrintf(LOG2, rf.me, "Beats sent from %v" , args.Leaderid)
 	}
 	rf.mu.Unlock()
@@ -215,10 +215,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else {
-		/* if args.Term == rf.currentTerm && rf.state == CANDIDATE {
-			// leader is already selected
-			rf.state = FOLLOWER // not using ConvertTo, because votedFor should not be changed
-		} */
 
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
@@ -325,6 +321,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 		rf.currentTerm += 1
 		rf.votedFor = rf.me
 	case FOLLOWER:
+		rf.resetTimer()
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 	case LEADER:
@@ -420,6 +417,12 @@ func (rf *Raft) handleAppendReply() {
 		rf.mu.Unlock()
 	}
 }
+
+// can only be called within mutex
+func (rf *Raft) resetTimer(){
+	rf.lastHB = time.Now()
+}
+
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
