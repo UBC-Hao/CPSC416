@@ -158,6 +158,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//
 	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
+		DPrintf(LOG2, rf.me, "STALE APPEND")
 		//stale
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -169,7 +170,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = true
 		//also change last recv
+		rf.votedFor = -1
 		rf.lastHB = time.Now()
+		DPrintf(LOG2,rf.me, "Beats")
 	}
 	rf.mu.Unlock()
 }
@@ -353,7 +356,7 @@ func (rf *Raft) SendHeartBeats() {
 }
 
 func voteTimeout() time.Duration {
-	ms := 325 + (rand.Int63() % 200) //325 - 525
+	ms := 200 + (rand.Int63() % 210) //200 - 410
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -383,9 +386,11 @@ func (rf *Raft) gatherVote() {
 					rf.mu.Lock()
 					rf.ConvertTo(LEADER)
 					rf.mu.Unlock()
+					return
 				}
 			}
 		case <-timeout:
+			DPrintf(LOG3, rf.me, "Timeout on ASKING for votes")
 			return
 		}
 	}
@@ -435,8 +440,7 @@ func (rf *Raft) ticker() {
 			if rf.lastHB.Add(rndTime).Before(now) && rf.votedFor == -1{
 				// timeout on HB, leader might crashed, follower -> Candidate
 				DPrintf(LOG1, rf.me, "TIMEOUT ON HB, F -> C.")
-				rf.ConvertTo(CANDIDATE)
-				rf.mu.Unlock()
+				//fall through to CANDIDATE BRANCH
 			} else {
 				// did not timeout on receiving HB, sleep and check again
 				rf.mu.Unlock()
@@ -444,8 +448,8 @@ func (rf *Raft) ticker() {
 				continue
 			}
 		}
-		// candidate
-		rf.mu.Lock()
+		//rf.state == CANDIDATE
+		rf.ConvertTo(CANDIDATE) // allows for candidate to candidate, +1 term
 		DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES")
 		rf.SendAllVoteReq()
 		rf.mu.Unlock()
