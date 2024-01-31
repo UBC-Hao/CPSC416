@@ -358,7 +358,7 @@ func (rf *Raft) SendHeartBeats() {
 }
 
 func voteTimeout() time.Duration {
-	ms := 200 + (rand.Int63() % 210) //200 - 410
+	ms := 2 * HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -510,7 +510,8 @@ const (
 	FOLLOWER    role = 0
 	CANDIDATE   role = 1
 	LEADER      role = 2
-	HB_INTERVAL      = 160 * time.Millisecond
+	HB_INTERVAL_RAW = 160
+	HB_INTERVAL      = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
 
