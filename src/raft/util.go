@@ -30,6 +30,10 @@ const (
 	INIT ptopic = "INIT"
 	REQV ptopic = "REQV"
 	LOG1 ptopic = "LOG1"
+	LOG2 ptopic = "LOG2"
+	LOG3 ptopic = "LOG3"
+	LOG4 ptopic = "LOG4"
+	LOG5 ptopic = "LOG5"
 	APPE ptopic = "APPE"
 )
 

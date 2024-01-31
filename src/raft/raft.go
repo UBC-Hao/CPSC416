@@ -208,6 +208,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
 		//stale
+		DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Stale", args.CandidateId)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else {
@@ -218,8 +219,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.Term = rf.currentTerm
 		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
+			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted",args.CandidateId)
 			reply.VoteGranted = false
 		} else {
+			DPrintf(LOG2, rf.me, "VOTE GRANTED TO %v",args.CandidateId)
 			rf.votedFor = args.CandidateId
 			reply.VoteGranted = true
 		}
@@ -358,7 +361,6 @@ func voteTimeout() time.Duration {
 func (rf *Raft) gatherVote() {
 	num := 1 // including my self
 	timeout := time.After(voteTimeout())
-	term_max := 0
 	for {
 		select {
 		case reply := <-rf.voteChan:
@@ -366,13 +368,14 @@ func (rf *Raft) gatherVote() {
 				//stale, do nothing
 				continue
 			}
-			if reply.Term > term_max {
-				rf.mu.Lock()
+			rf.mu.Lock()
+			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.ConvertTo(FOLLOWER)
 				rf.mu.Unlock()
 				return
 			}
+			rf.mu.Unlock()
 			if reply.VoteGranted {
 				num++
 				if num >= rf.F{
@@ -411,21 +414,25 @@ func (rf *Raft) ticker() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-
 		rf.mu.Lock()
 		// Leader, send heartbeat
 		if rf.state == LEADER {
 			rf.mu.Unlock()
+			DPrintf(LOG1, rf.me, "LEADER SPREADS HB")
 			rf.SendHeartBeats()
 			time.Sleep(HB_INTERVAL)
 			continue
 		}
 		//follower, check if timedout on HB
 		if rf.state == FOLLOWER {
+			rf.mu.Unlock()
+
 			time.Sleep(voteTimeout())
+
+			rf.mu.Lock()
 			rndTime := voteTimeout()
 			now := time.Now()
-			if rf.lastHB.Add(rndTime).Before(now) && rf.votedFor != -1{
+			if rf.lastHB.Add(rndTime).Before(now) && rf.votedFor == -1{
 				// timeout on HB, leader might crashed, follower -> Candidate
 				DPrintf(LOG1, rf.me, "TIMEOUT ON HB, F -> C.")
 				rf.ConvertTo(CANDIDATE)
@@ -439,6 +446,7 @@ func (rf *Raft) ticker() {
 		}
 		// candidate
 		rf.mu.Lock()
+		DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES")
 		rf.SendAllVoteReq()
 		rf.mu.Unlock()
 		// Candidate, gather votes, will block for random time
@@ -491,8 +499,8 @@ const (
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
 
-func (r* role) String() string{
-	switch(*r){
+func (r role) String() string{
+	switch(r){
 	case FOLLOWER:
 		return "FOLLOWER"
 	case CANDIDATE:
