@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,21 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	currentTerm int
+	votedFor    int
+	state       role
+	lastHB      time.Time
+	//log[]
+
+	F int // total number of peers is 2*F+ 1
+	// voteChan is used to collect results
+	voteChan   chan *RequestVoteReply
+	appendChan chan *AppendEntriesReply
+}
+
+// for debug
+func (rf *Raft) String() string {
+	return fmt.Sprintf("(me %v, term: %v,votedFor: %v, state: %v)", rf.me, rf.currentTerm, rf.votedFor, rf.state)
 }
 
 // return currentTerm and whether this server
@@ -69,7 +85,8 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
-	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = rf.state == LEADER
 	return term, isleader
 }
 
@@ -120,21 +137,94 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
+// Invoked by leader to replicate log or send heartbeats
+type AppendEntriesArgs struct {
+	Term     int // leader's term
+	Leaderid int // so follower can redirect clients
+	//PrevLogIndex
+	//PrevLogTerm
+	Entries []byte
+	//LeaderCommit
+}
+
+type AppendEntriesReply struct {
+	Term    int  //current term for leader to update itself
+	Success bool //
+}
+
+// executed by the nodes reachable
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	DPrintf(APPE, rf.me, "<- AppendEntries(%v, %v)   stateBefore = %v", args.Term, args.Leaderid, rf)
+	//
+	rf.mu.Lock()
+	if args.Term < rf.currentTerm {
+		//stale
+		reply.Term = rf.currentTerm
+		reply.Success = false
+	} else {
+		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+			rf.ConvertTo(FOLLOWER)
+		}
+		reply.Term = rf.currentTerm
+		reply.Success = true
+		//also change last recv
+		rf.lastHB = time.Now()
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
+	reply := &AppendEntriesReply{}
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	if ok {
+		rf.appendChan <- reply
+	}
+	return ok
+}
+
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term        int // candidate's term
+	CandidateId int // the candidate
+	//LastLogIndex int
+	//lastLogTerm
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int // current term for candidate to update
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)  stateBefore = %v", args.Term, args.CandidateId, rf)
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	if args.Term < rf.currentTerm {
+		//stale
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+	} else {
+		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+			rf.ConvertTo(FOLLOWER)
+		}
+
+		reply.Term = rf.currentTerm
+		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
+			reply.VoteGranted = false
+		} else {
+			rf.votedFor = args.CandidateId
+			reply.VoteGranted = true
+		}
+	}
+	rf.mu.Unlock()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -164,8 +254,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
+	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if ok {
+		rf.voteChan <- reply
+	}
 	return ok
 }
 
@@ -210,16 +304,145 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// nonblocking, ConvertTo should only be called within mutex
+func (rf *Raft) ConvertTo(newstate role) {
+	DPrintf(LOG1, rf.me," converted from %v to %v ",rf.state ,newstate)
+	switch newstate {
+	case CANDIDATE:
+		rf.state = CANDIDATE
+		//start election
+		rf.currentTerm += 1
+		rf.votedFor = rf.me
+	case FOLLOWER:
+		rf.votedFor = -1
+		rf.state = FOLLOWER
+	case LEADER:
+		rf.votedFor = -1
+		rf.state = LEADER
+		rf.SendHeartBeats()
+	}
+}
+
+// this is non-blocking, should only be called within mutex
+func (rf *Raft) SendAllVoteReq() {
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			send := &RequestVoteArgs{
+				Term:        rf.currentTerm,
+				CandidateId: rf.me,
+			}
+			go rf.sendRequestVote(i, send)
+		}
+	}
+}
+
+// this is non-blocking, should only be called within mutex
+func (rf *Raft) SendHeartBeats() {
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			send := &AppendEntriesArgs{
+				Term:  rf.currentTerm,
+				Leaderid: rf.me,
+			}
+			go rf.sendAppendEntries(i, send)
+		}
+	}
+}
+
+func voteTimeout() time.Duration {
+	ms := 325 + (rand.Int63() % 200) //325 - 525
+	return time.Duration(ms) * time.Millisecond
+}
+
+// blocking function,
+func (rf *Raft) gatherVote() {
+	num := 1 // including my self
+	timeout := time.After(voteTimeout())
+	term_max := 0
+	for {
+		select {
+		case reply := <-rf.voteChan:
+			if reply.Term < rf.currentTerm {
+				//stale, do nothing
+				continue
+			}
+			if reply.Term > term_max {
+				rf.mu.Lock()
+				rf.currentTerm = reply.Term
+				rf.ConvertTo(FOLLOWER)
+				rf.mu.Unlock()
+				return
+			}
+			if reply.VoteGranted {
+				num++
+				if num >= rf.F{
+					//becomes the leader
+					rf.mu.Lock()
+					rf.ConvertTo(LEADER)
+					rf.mu.Unlock()
+				}
+			}
+		case <-timeout:
+			return
+		}
+	}
+}
+
+// owned by leader, blocking, can also be called by follower or candidates, but nothing happens if so
+func (rf *Raft) handleAppendReply() {
+	for reply := range rf.appendChan {
+		rf.mu.Lock()
+		if rf.state == LEADER {
+			/*if reply.Term < rf.currentTerm{
+				//stale , discard
+
+			}*/
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.ConvertTo(FOLLOWER)
+			}
+		}
+		rf.mu.Unlock()
+	}
+}
+
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
 
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Lock()
+		// Leader, send heartbeat
+		if rf.state == LEADER {
+			rf.mu.Unlock()
+			rf.SendHeartBeats()
+			time.Sleep(HB_INTERVAL)
+			continue
+		}
+		//follower, check if timedout on HB
+		if rf.state == FOLLOWER {
+			time.Sleep(voteTimeout())
+			rndTime := voteTimeout()
+			now := time.Now()
+			if rf.lastHB.Add(rndTime).Before(now) && rf.votedFor != -1{
+				// timeout on HB, leader might crashed, follower -> Candidate
+				DPrintf(LOG1, rf.me, "TIMEOUT ON HB, F -> C.")
+				rf.ConvertTo(CANDIDATE)
+				rf.mu.Unlock()
+			} else {
+				// did not timeout on receiving HB, sleep and check again
+				rf.mu.Unlock()
+				time.Sleep(rf.lastHB.Add(rndTime).Sub(now))
+				continue
+			}
+		}
+		// candidate
+		rf.mu.Lock()
+		rf.SendAllVoteReq()
+		rf.mu.Unlock()
+		// Candidate, gather votes, will block for random time
+		rf.gatherVote()
 	}
 }
 
@@ -241,12 +464,41 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	DPrintf(INIT, me, "Init")
+	rf.votedFor = -1
+	rf.state = FOLLOWER
+	rf.voteChan = make(chan *RequestVoteReply)
+	rf.appendChan = make(chan *AppendEntriesReply)
+	rf.F = len(peers) / 2
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.handleAppendReply()
 
 	return rf
+}
+
+// ----- definition for some custom variable
+type role int
+
+const (
+	FOLLOWER    role = 0
+	CANDIDATE   role = 1
+	LEADER      role = 2
+	HB_INTERVAL      = 160 * time.Millisecond
+	//HB_TIMEOUT       = 2 * HB_INTERVAL
+)
+
+func (r* role) String() string{
+	switch(*r){
+	case FOLLOWER:
+		return "FOLLOWER"
+	case CANDIDATE:
+		return "CANDIDATE"
+	case LEADER:
+		return "LEADER"
+	}
+	return "?"
 }

@@ -28,6 +28,9 @@ type ptopic string
 
 const (
 	INIT ptopic = "INIT"
+	REQV ptopic = "REQV"
+	LOG1 ptopic = "LOG1"
+	APPE ptopic = "APPE"
 )
 
 func DPrintf(topic ptopic, me int ,format string, a ...interface{}) (n int, err error) {

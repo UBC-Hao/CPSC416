@@ -13,9 +13,9 @@ from rich.traceback import install
 # Mapping from topics to colors
 TOPICS = {
     "INIT": "#9a9a99",
-    "VOTE": "#67a0b2",
-    "LEAD": "#d0b343",
-    "TERM": "#70c43f",
+    "REQV": "#67a0b2",
+    "APPE": "#d0b343",
+    "LOG0": "#70c43f",
     "LOG1": "#4878bc",
     "LOG2": "#398280",
     "CMIT": "#98719f",
