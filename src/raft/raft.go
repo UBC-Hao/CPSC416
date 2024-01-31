@@ -170,9 +170,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = true
 		//also change last recv
-		rf.votedFor = -1
 		rf.lastHB = time.Now()
-		DPrintf(LOG2,rf.me, "Beats")
+		DPrintf(LOG2, rf.me, "Beats sent from %v" , args.Leaderid)
 	}
 	rf.mu.Unlock()
 }
@@ -215,6 +214,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else {
+		if args.Term == rf.currentTerm && rf.state == CANDIDATE {
+			// leader is already selected
+			rf.state = FOLLOWER // not using ConvertTo, because votedFor should not be changed
+		}
+
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
 			rf.ConvertTo(FOLLOWER)
@@ -222,7 +226,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.Term = rf.currentTerm
 		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
-			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted",args.CandidateId)
+			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v",args.CandidateId, rf.votedFor)
 			reply.VoteGranted = false
 		} else {
 			DPrintf(LOG2, rf.me, "VOTE GRANTED TO %v",args.CandidateId)
@@ -323,7 +327,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 	case LEADER:
-		rf.votedFor = -1
+		rf.votedFor = rf.me
 		rf.state = LEADER
 		rf.SendHeartBeats()
 	}
@@ -381,7 +385,7 @@ func (rf *Raft) gatherVote() {
 			rf.mu.Unlock()
 			if reply.VoteGranted {
 				num++
-				if num >= rf.F{
+				if num >= rf.F + 1{
 					//becomes the leader
 					rf.mu.Lock()
 					rf.ConvertTo(LEADER)
@@ -423,7 +427,7 @@ func (rf *Raft) ticker() {
 		// Leader, send heartbeat
 		if rf.state == LEADER {
 			rf.mu.Unlock()
-			DPrintf(LOG1, rf.me, "LEADER SPREADS HB")
+			DPrintf(LOG1, rf.me, "LEADER SPREADS HB, term = %v", rf.currentTerm)
 			rf.SendHeartBeats()
 			time.Sleep(HB_INTERVAL)
 			continue
@@ -433,11 +437,12 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 
 			time.Sleep(voteTimeout())
-
+			
 			rf.mu.Lock()
+			//only proceed if it's still a follower
 			rndTime := voteTimeout()
 			now := time.Now()
-			if rf.lastHB.Add(rndTime).Before(now) && rf.votedFor == -1{
+			if rf.lastHB.Add(rndTime).Before(now){ //whatif votedFor != none ?
 				// timeout on HB, leader might crashed, follower -> Candidate
 				DPrintf(LOG1, rf.me, "TIMEOUT ON HB, F -> C.")
 				//fall through to CANDIDATE BRANCH
@@ -450,7 +455,7 @@ func (rf *Raft) ticker() {
 		}
 		//rf.state == CANDIDATE
 		rf.ConvertTo(CANDIDATE) // allows for candidate to candidate, +1 term
-		DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES")
+		DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES, term = %v", rf.currentTerm)
 		rf.SendAllVoteReq()
 		rf.mu.Unlock()
 		// Candidate, gather votes, will block for random time

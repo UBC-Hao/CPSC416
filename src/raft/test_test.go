@@ -99,15 +99,19 @@ func TestManyElections2A(t *testing.T) {
 
 	cfg.checkOneLeader()
 
-	iters := 10
+	iters := 20
 	for ii := 1; ii < iters; ii++ {
+		DPrintfline()
 		// disconnect three nodes
 		i1 := rand.Int() % servers
 		i2 := rand.Int() % servers
 		i3 := rand.Int() % servers
 		cfg.disconnect(i1)
+		DPrintf(LOG3,i1,"DISCONNECTED FROM NETWORK")
 		cfg.disconnect(i2)
+		DPrintf(LOG3,i2,"DISCONNECTED FROM NETWORK")
 		cfg.disconnect(i3)
+		DPrintf(LOG3,i3,"DISCONNECTED FROM NETWORK")
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
