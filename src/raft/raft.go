@@ -82,7 +82,8 @@ func (rf *Raft) String() string {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	var term int
 	var isleader bool
 	term = rf.currentTerm
@@ -214,10 +215,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else {
-		if args.Term == rf.currentTerm && rf.state == CANDIDATE {
+		/* if args.Term == rf.currentTerm && rf.state == CANDIDATE {
 			// leader is already selected
 			rf.state = FOLLOWER // not using ConvertTo, because votedFor should not be changed
-		}
+		} */
 
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
@@ -371,11 +372,13 @@ func (rf *Raft) gatherVote() {
 	for {
 		select {
 		case reply := <-rf.voteChan:
+			rf.mu.Lock()
 			if reply.Term < rf.currentTerm {
 				//stale, do nothing
+				rf.mu.Unlock()
 				continue
 			}
-			rf.mu.Lock()
+			
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.ConvertTo(FOLLOWER)
@@ -426,9 +429,9 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		// Leader, send heartbeat
 		if rf.state == LEADER {
-			rf.mu.Unlock()
 			DPrintf(LOG1, rf.me, "LEADER SPREADS HB, term = %v", rf.currentTerm)
 			rf.SendHeartBeats()
+			rf.mu.Unlock()
 			time.Sleep(HB_INTERVAL)
 			continue
 		}
@@ -449,7 +452,7 @@ func (rf *Raft) ticker() {
 			} else {
 				// did not timeout on receiving HB, sleep and check again
 				rf.mu.Unlock()
-				time.Sleep(rf.lastHB.Add(rndTime).Sub(now))
+				//time.Sleep(rf.lastHB.Add(rndTime).Sub(now))
 				continue
 			}
 		}
