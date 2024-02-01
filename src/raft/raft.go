@@ -441,12 +441,11 @@ func (rf *Raft) ticker() {
 		//follower, check if timedout on HB
 		if rf.state == FOLLOWER {
 			rf.mu.Unlock()
-
-			time.Sleep(voteTimeout())
-			
+			rndTime := voteTimeout()
+			time.Sleep(rndTime)
 			rf.mu.Lock()
 			//only proceed if it's still a follower
-			rndTime := voteTimeout()
+			
 			now := time.Now()
 			if rf.lastHB.Add(rndTime).Before(now){ //whatif votedFor != none ?
 				// timeout on HB, leader might crashed, follower -> Candidate
