@@ -158,6 +158,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf(APPE, rf.me, "<- AppendEntries(%v, %v)   stateBefore = %v", args.Term, args.Leaderid, rf)
 	//
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		DPrintf(LOG2, rf.me, "STALE APPEND")
 		//stale
@@ -172,9 +173,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		//also change last recv
 		rf.resetTimer()
-		DPrintf(LOG2, rf.me, "Beats sent from %v" , args.Leaderid)
+		DPrintf(LOG2, rf.me, "Beats sent from %v", args.Leaderid)
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
@@ -209,6 +209,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)  stateBefore = %v", args.Term, args.CandidateId, rf)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		//stale
 		DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Stale", args.CandidateId)
@@ -223,15 +224,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.Term = rf.currentTerm
 		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
-			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v",args.CandidateId, rf.votedFor)
+			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v", args.CandidateId, rf.votedFor)
 			reply.VoteGranted = false
 		} else {
-			DPrintf(LOG2, rf.me, "VOTE GRANTED TO %v",args.CandidateId)
+			DPrintf(LOG2, rf.me, "VOTE GRANTED TO %v", args.CandidateId)
 			rf.votedFor = args.CandidateId
 			reply.VoteGranted = true
 		}
 	}
-	rf.mu.Unlock()
+	
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -313,7 +314,7 @@ func (rf *Raft) killed() bool {
 
 // nonblocking, ConvertTo should only be called within mutex
 func (rf *Raft) ConvertTo(newstate role) {
-	DPrintf(LOG1, rf.me," converted from %v to %v ",rf.state ,newstate)
+	DPrintf(LOG1, rf.me, " converted from %v to %v ", rf.state, newstate)
 	switch newstate {
 	case CANDIDATE:
 		rf.state = CANDIDATE
@@ -349,7 +350,7 @@ func (rf *Raft) SendHeartBeats() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			send := &AppendEntriesArgs{
-				Term:  rf.currentTerm,
+				Term:     rf.currentTerm,
 				Leaderid: rf.me,
 			}
 			go rf.sendAppendEntries(i, send)
@@ -358,7 +359,7 @@ func (rf *Raft) SendHeartBeats() {
 }
 
 func voteTimeout() time.Duration {
-	ms := 2 * HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
+	ms := 2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -375,7 +376,7 @@ func (rf *Raft) gatherVote() {
 				rf.mu.Unlock()
 				continue
 			}
-			
+
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.ConvertTo(FOLLOWER)
@@ -385,7 +386,7 @@ func (rf *Raft) gatherVote() {
 			rf.mu.Unlock()
 			if reply.VoteGranted {
 				num++
-				if num >= rf.F + 1{
+				if num >= rf.F+1 {
 					//becomes the leader
 					rf.mu.Lock()
 					rf.ConvertTo(LEADER)
@@ -419,52 +420,51 @@ func (rf *Raft) handleAppendReply() {
 }
 
 // can only be called within mutex
-func (rf *Raft) resetTimer(){
+func (rf *Raft) resetTimer() {
 	rf.lastHB = time.Now()
 }
 
-
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		rf.mu.Lock()
 		// Leader, send heartbeat
-		if rf.state == LEADER {
+		switch rf.state {
+		case LEADER:
 			DPrintf(LOG1, rf.me, "LEADER SPREADS HB, term = %v", rf.currentTerm)
 			rf.SendHeartBeats()
 			rf.mu.Unlock()
 			time.Sleep(HB_INTERVAL)
 			continue
-		}
-		//follower, check if timedout on HB
-		if rf.state == FOLLOWER {
+
+		case FOLLOWER:
 			rf.mu.Unlock()
 			rndTime := voteTimeout()
 			time.Sleep(rndTime)
 			rf.mu.Lock()
 			//only proceed if it's still a follower
-			
+
 			now := time.Now()
-			if rf.lastHB.Add(rndTime).Before(now){ //whatif votedFor != none ?
-				// timeout on HB, leader might crashed, follower -> Candidate
-				DPrintf(LOG1, rf.me, "TIMEOUT ON HB, F -> C.")
-				//fall through to CANDIDATE BRANCH
-			} else {
-				// did not timeout on receiving HB, sleep and check again
+			if !rf.lastHB.Add(rndTime).Before(now) {
+				//did not time out on HB
 				rf.mu.Unlock()
-				//time.Sleep(rf.lastHB.Add(rndTime).Sub(now))
 				continue
 			}
+			//else, time out on HB
+			// timeout on HB, leader might crashed, follower -> Candidate
+			DPrintf(LOG1, rf.me, "TIMEOUT ON HB, F -> C.")
+			fallthrough // becomes a Candidate
+
+		case CANDIDATE:
+			rf.ConvertTo(CANDIDATE) // +1 term
+			DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES, term = %v", rf.currentTerm)
+			rf.SendAllVoteReq()
+			rf.mu.Unlock()
+			// Candidate, gather votes, will block for random time
+			rf.gatherVote()
 		}
-		//rf.state == CANDIDATE
-		rf.ConvertTo(CANDIDATE) // allows for candidate to candidate, +1 term
-		DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES, term = %v", rf.currentTerm)
-		rf.SendAllVoteReq()
-		rf.mu.Unlock()
-		// Candidate, gather votes, will block for random time
-		rf.gatherVote()
+
 	}
 }
 
@@ -506,16 +506,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 type role int
 
 const (
-	FOLLOWER    role = 0
-	CANDIDATE   role = 1
-	LEADER      role = 2
-	HB_INTERVAL_RAW = 160
-	HB_INTERVAL      = HB_INTERVAL_RAW * time.Millisecond
+	FOLLOWER        role = 0
+	CANDIDATE       role = 1
+	LEADER          role = 2
+	HB_INTERVAL_RAW      = 160
+	HB_INTERVAL          = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
 
-func (r role) String() string{
-	switch(r){
+func (r role) String() string {
+	switch r {
 	case FOLLOWER:
 		return "FOLLOWER"
 	case CANDIDATE:
