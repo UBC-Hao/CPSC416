@@ -66,14 +66,13 @@ type Raft struct {
 	votedFor    int
 	state       role
 	lastHB      time.Time
-	log	[]Log
+	log         []Log
 	commitIndex int
-	lastApplied int
-
+	lastApplied int 
 
 	//initialized after becoming a leader.
-	nextIndex []int
-	matchIndex []int
+	nextIndex  []int
+	matchIndex []int // -1 to indicate the last applid is not found yet
 
 	F int // total number of peers is 2*F+ 1
 	// voteChan is used to collect results
@@ -147,17 +146,22 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 // Invoked by leader to replicate log or send heartbeats
 type AppendEntriesArgs struct {
-	Term     int // leader's term
-	Leaderid int // so follower can redirect clients
+	Term         int // leader's term
+	Leaderid     int // so follower can redirect clients
 	PrevLogIndex int
-	PrevLogTerm int
-	Entries []Log
+	PrevLogTerm  int
+	Entries      []Log
 	LeaderCommit int // leader's commit index
 }
 
 type AppendEntriesReply struct {
 	Term    int  //current term for leader to update itself
 	Success bool //
+
+	// not transferred using RPC
+	server int 
+	prevLogIndex int
+	entriesMaxIndex int // maximum index in Entries used for updating nextIndex
 }
 
 // executed by the nodes reachable
@@ -177,15 +181,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.ConvertTo(FOLLOWER)
 		}
 		reply.Term = rf.currentTerm
-		reply.Success = true
 
-		// reply false if log doesn't contain an entry at 
+		// reply false if log doesn't contain an entry at
 		//    prevLogIndex whose term matches prevLogTerm
-		if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { 
+		if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			reply.Success = false
+		} else {
+			if len(args.Entries) != 0 {
+				rf.log = extend(rf.log, args.Entries)
+			}
+			rf.checkValid()
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = args.LeaderCommit
+				lastIndex :=  rf.log[len(rf.log) - 1].Index
+				if lastIndex < rf.commitIndex{
+					rf.commitIndex = lastIndex
+				}
+			}
+			reply.Success = true
 		}
-
-		
 
 		//reply.Success = true
 		//also change last recv
@@ -197,7 +211,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	reply := &AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	if ok && !rf.killed(){
+	reply.server = server
+	reply.prevLogIndex = args.PrevLogIndex
+	reply.entriesMaxIndex = 0
+	if len(args.Entries) != 0{
+		reply.entriesMaxIndex = args.Entries[len(args.Entries) - 1].Index
+	}
+	if ok && !rf.killed() {
 		rf.appendChan <- reply
 	}
 	return ok
@@ -207,10 +227,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int // candidate's term
-	CandidateId int // the candidate
+	Term         int // candidate's term
+	CandidateId  int // the candidate
 	LastLogIndex int
-	LastLogTerm int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
@@ -249,7 +269,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 		}
 	}
-	
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -282,7 +302,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if ok && !rf.killed(){
+	if ok && !rf.killed() {
 		rf.voteChan <- reply
 	}
 	return ok
@@ -311,7 +331,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	isLeader = rf.state == LEADER
 	term = rf.currentTerm
-
+	index = len(rf.log)
+	newlog := Log{
+		Command: command,
+		Term: term,
+		Index: index,
+	}
+	rf.log = append(rf.log, newlog)
 	return index, term, isLeader
 }
 
@@ -350,10 +376,12 @@ func (rf *Raft) ConvertTo(newstate role) {
 	case LEADER:
 		rf.votedFor = rf.me
 		rf.state = LEADER
-		rf.nextIndex = make([]int, 2 * rf.F + 1)
+		rf.nextIndex = make([]int, 2*rf.F+1)
 		//initialize nextIndex to the last log index + 1 ( = len(rf.log))
-		for i:=0;i<2*rf.F+1;i++{ rf.nextIndex[i] = len(rf.log) }
-		rf.matchIndex = make([]int, 2 * rf.F + 1)
+		for i := 0; i < 2*rf.F+1; i++ {
+			rf.nextIndex[i] = len(rf.log)
+		}
+		rf.matchIndex = make([]int, 2*rf.F+1) 
 		//rf.SendHeartBeats() (not neccessary, ticker will be executed after this)
 	}
 }
@@ -372,20 +400,29 @@ func (rf *Raft) SendAllVoteReq() {
 }
 
 // this is non-blocking, should only be called within mutex
-func (rf *Raft) SendHeartBeats() {
+func (rf *Raft) BroadcastAppendEntries() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
+			entries := []Log{} 
+			if rf.matchIndex[i] != -1{
+				entries = getTail(rf.log, rf.matchIndex[i])
+			}//else,  no match information on i yet, do not send all entries to reduce IO cost
 			send := &AppendEntriesArgs{
 				Term:     rf.currentTerm,
 				Leaderid: rf.me,
+				Entries: entries,
+				PrevLogIndex: rf.log[rf.nextIndex[i]- 1].Index,
+				PrevLogTerm: rf.log[rf.nextIndex[i] - 1].Term,
+				LeaderCommit: rf.commitIndex,
 			}
+			// This packet might be lost, we should not update nextIndex or matchIndex here
 			go rf.sendAppendEntries(i, send)
 		}
 	}
 }
 
 func voteTimeout() time.Duration {
-	ms := 50+2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW + 50
+	ms := 50 + 2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW + 50
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -430,15 +467,31 @@ func (rf *Raft) gatherVote() {
 // owned by leader, blocking, can also be called by follower or candidates, but nothing happens if so
 func (rf *Raft) handleAppendReply() {
 	for reply := range rf.appendChan {
+		if rf.killed() { return }
 		rf.mu.Lock()
 		if rf.state == LEADER {
-			/*if reply.Term < rf.currentTerm{
-				//stale , discard
-
-			}*/
+			if reply.Term < rf.currentTerm{ // stale reply
+				rf.mu.Unlock()
+				continue
+			}
+			server := reply.server
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.ConvertTo(FOLLOWER)
+			}else{ // reply.Term == rf.currentTerm
+				success := reply.Success
+				if success == false{
+					// match index is not found,
+					rf.nextIndex[server] -= 1
+				}else{
+					rf.matchIndex[server] = reply.prevLogIndex
+					if reply.entriesMaxIndex != 0{
+						// this means some entries are sent to the server and is successfully updated
+						rf.nextIndex[server] = reply.entriesMaxIndex + 1
+						rf.matchIndex[server] = reply.entriesMaxIndex
+					}
+					rf.updateLeaderCommitIDX()
+				}
 			}
 		}
 		rf.mu.Unlock()
@@ -459,7 +512,7 @@ func (rf *Raft) ticker() {
 		switch rf.state {
 		case LEADER:
 			DPrintf(LOG1, rf.me, "LEADER SPREADS HB, term = %v", rf.currentTerm)
-			rf.SendHeartBeats()
+			rf.BroadcastAppendEntries()
 			rf.mu.Unlock()
 			time.Sleep(HB_INTERVAL)
 			continue
@@ -554,25 +607,75 @@ func (r role) String() string {
 	return "?"
 }
 
-//returns the last index in the log, can only be called within the mutex
-func (rf *Raft) lastLogIndex() int{
+// returns the last index in the log, can only be called within the mutex
+func (rf *Raft) lastLogIndex() int {
 	sz := len(rf.log)
 	sz -= 1
 	return sz
 }
 
-type Log struct{
+type Log struct {
 	Command interface{}
-	Term int
-	Index int
+	Term    int
+	Index   int
 }
 
-func (log *Log) String() string{
-	return fmt.Sprintf("(%v,%v)",log.Term, log.Command)
+func (log *Log) String() string {
+	return fmt.Sprintf("(%v,%v)", log.Term, log.Command)
+}
+
+// given a Log array, A, extend at index B
+func extend(A []Log, B []Log) []Log {
+	if len(B) == 0 {
+		return A
+	}
+	start := B[0].Index
+	A = A[:start]
+	return append(A, B...)
+}
+
+
+//given a Log array A, returns A[index + 1:]
+func getTail(A []Log, index int) []Log {
+	if (index + 1) >= len(A) {
+		return []Log{}
+	}else{
+		ret := make([]Log, len(A[index + 1 : ]))
+		copy(ret, A[index + 1 : ])
+		return ret
+	}
+}
+//should only be called within mutex
+func (rf *Raft) updateLeaderCommitIDX(){
+	assert(rf.state == LEADER)
+	minMatch := rf.matchIndex[0]
+	if rf.me == 0 {minMatch = rf.matchIndex[1]}
+	for i:=0;i<len(rf.peers);i++{
+		if i!=rf.me{
+			if rf.matchIndex[i] < minMatch {
+				minMatch = rf.matchIndex[i]
+			}
+		}
+	}
+	if rf.log[minMatch].Term == rf.currentTerm {
+		rf.commitIndex = minMatch
+	}
+}
+
+
+//debug function for checking if the log is valid
+func (rf *Raft) checkValid(){
+	if !Debug{
+		return
+	}
+	log := rf.log
+	for i:=1;i<len(log);i++{
+		assert(log[i].Index == i)
+	}
 }
 
 func assert(a bool) {
-	if (!a && Debug){
+	if Debug && !a {
 		DPrintf(FATAL, 0, "ASSERTION BUG")
 	}
 }
