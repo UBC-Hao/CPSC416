@@ -66,7 +66,14 @@ type Raft struct {
 	votedFor    int
 	state       role
 	lastHB      time.Time
-	//log[]
+	log	[]Log
+	commitIndex int
+	lastApplied int
+
+
+	//initialized after becoming a leader.
+	nextIndex []int
+	matchIndex []int
 
 	F int // total number of peers is 2*F+ 1
 	// voteChan is used to collect results
@@ -142,10 +149,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 type AppendEntriesArgs struct {
 	Term     int // leader's term
 	Leaderid int // so follower can redirect clients
-	//PrevLogIndex
-	//PrevLogTerm
-	Entries []byte
-	//LeaderCommit
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []Log
+	LeaderCommit int // leader's commit index
 }
 
 type AppendEntriesReply struct {
@@ -155,7 +162,7 @@ type AppendEntriesReply struct {
 
 // executed by the nodes reachable
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	DPrintf(APPE, rf.me, "<- AppendEntries(%v, %v)   stateBefore = %v", args.Term, args.Leaderid, rf)
+	DPrintf(APPE, rf.me, "<- AppendEntries(%v, %v),stateBefore = %v", args.Term, args.Leaderid, rf)
 	//
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -163,7 +170,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf(LOG2, rf.me, "STALE APPEND")
 		//stale
 		reply.Term = rf.currentTerm
-		reply.Success = false
+		reply.Success = true
 	} else {
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
@@ -171,6 +178,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		reply.Term = rf.currentTerm
 		reply.Success = true
+
+		// reply false if log doesn't contain an entry at 
+		//    prevLogIndex whose term matches prevLogTerm
+		if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { 
+			reply.Success = false
+		}
+
+		
+
+		//reply.Success = true
 		//also change last recv
 		rf.resetTimer()
 		DPrintf(LOG2, rf.me, "Beats sent from %v", args.Leaderid)
@@ -180,7 +197,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	reply := &AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	if ok {
+	if ok && !rf.killed(){
 		rf.appendChan <- reply
 	}
 	return ok
@@ -192,8 +209,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term        int // candidate's term
 	CandidateId int // the candidate
-	//LastLogIndex int
-	//lastLogTerm
+	LastLogIndex int
+	LastLogTerm int
 }
 
 // example RequestVote RPC reply structure.
@@ -265,7 +282,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if ok {
+	if ok && !rf.killed(){
 		rf.voteChan <- reply
 	}
 	return ok
@@ -289,6 +306,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	isLeader = rf.state == LEADER
+	term = rf.currentTerm
 
 	return index, term, isLeader
 }
@@ -328,7 +350,11 @@ func (rf *Raft) ConvertTo(newstate role) {
 	case LEADER:
 		rf.votedFor = rf.me
 		rf.state = LEADER
-		rf.SendHeartBeats()
+		rf.nextIndex = make([]int, 2 * rf.F + 1)
+		//initialize nextIndex to the last log index + 1 ( = len(rf.log))
+		for i:=0;i<2*rf.F+1;i++{ rf.nextIndex[i] = len(rf.log) }
+		rf.matchIndex = make([]int, 2 * rf.F + 1)
+		//rf.SendHeartBeats() (not neccessary, ticker will be executed after this)
 	}
 }
 
@@ -359,7 +385,7 @@ func (rf *Raft) SendHeartBeats() {
 }
 
 func voteTimeout() time.Duration {
-	ms := 2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
+	ms := 50+2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW + 50
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -491,6 +517,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteChan = make(chan *RequestVoteReply)
 	rf.appendChan = make(chan *AppendEntriesReply)
 	rf.F = len(peers) / 2
+	rf.log = []Log{{}} // Starts from 1
+	assert(len(rf.log) == 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -509,7 +537,7 @@ const (
 	FOLLOWER        role = 0
 	CANDIDATE       role = 1
 	LEADER          role = 2
-	HB_INTERVAL_RAW      = 160
+	HB_INTERVAL_RAW      = 180
 	HB_INTERVAL          = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
@@ -524,4 +552,27 @@ func (r role) String() string {
 		return "LEADER"
 	}
 	return "?"
+}
+
+//returns the last index in the log, can only be called within the mutex
+func (rf *Raft) lastLogIndex() int{
+	sz := len(rf.log)
+	sz -= 1
+	return sz
+}
+
+type Log struct{
+	Command interface{}
+	Term int
+	Index int
+}
+
+func (log *Log) String() string{
+	return fmt.Sprintf("(%v,%v)",log.Term, log.Command)
+}
+
+func assert(a bool) {
+	if (!a && Debug){
+		DPrintf(FATAL, 0, "ASSERTION BUG")
+	}
 }

@@ -13,7 +13,7 @@ import (
 //
 //	Use the following to generate better logs, provided by TA
 //	 go test -run 2A | python3 parselog.py -c 3 -i Test,Test2
-const Debug = false
+const Debug = true
 
 var (
 	debugStart time.Time
@@ -36,9 +36,13 @@ const (
 	LOG4  ptopic = "LOG4"
 	LOG5  ptopic = "LOG5"
 	APPE  ptopic = "APPE"
+	FATAL ptopic = "FATAL"
 )
 
 func DPrintf(topic ptopic, me int, format string, a ...interface{}) (n int, err error) {
+	if topic == FATAL {
+		log.Fatal(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format)
+	}
 	if Debug {
 		log.Printf(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format, a...)
 	}
