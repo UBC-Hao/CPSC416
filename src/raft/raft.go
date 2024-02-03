@@ -83,7 +83,7 @@ type Raft struct {
 
 // for debug
 func (rf *Raft) String() string {
-	return fmt.Sprintf("(me %v, term: %v,votedFor: %v, state: %v)", rf.me, rf.currentTerm, rf.votedFor, rf.state)
+	return fmt.Sprintf("(me %v,term: %v, state: %v, logs: %v,commitIdx: %v)", rf.me, rf.currentTerm, rf.state, rf.log, rf.commitIndex)
 }
 
 // return currentTerm and whether this server
@@ -183,6 +183,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
+			rf.resetTimer()
 			rf.ConvertTo(FOLLOWER)
 		}
 		reply.Term = rf.currentTerm
@@ -256,7 +257,7 @@ type RequestVoteReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)  stateBefore = %v", args.Term, args.CandidateId, rf)
+	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)", args.Term, args.CandidateId)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -269,7 +270,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
-			rf.ConvertTo(FOLLOWER)
+			rf.ConvertTo(FOLLOWER) // Do not reset timer here for quickly vote
 		}
 
 		reply.Term = rf.currentTerm
@@ -277,11 +278,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v", args.CandidateId, rf.votedFor)
 			reply.VoteGranted = false
 		} else {
-			myLastLog := rf.log[len(rf.log) - 1]
-			if myLastLog.Term > args.LastLogTerm || (myLastLog.Term == args.LastLogTerm && myLastLog.Index > args.LastLogIndex ){
-				DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Not the lastest LOG", args.CandidateId)
+			myLastLog := rf.log[len(rf.log)-1]
+			if myLastLog.Term > args.LastLogTerm || (myLastLog.Term == args.LastLogTerm && myLastLog.Index > args.LastLogIndex) {
+				DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Not the latest LOG", args.CandidateId)
 				reply.VoteGranted = false
-			}else{
+			} else {
 				DPrintf(LOG2, rf.me, "VOTE GRANTED TO %v", args.CandidateId)
 				rf.votedFor = args.CandidateId
 				reply.VoteGranted = true
@@ -383,15 +384,16 @@ func (rf *Raft) killed() bool {
 
 // nonblocking, ConvertTo should only be called within mutex
 func (rf *Raft) ConvertTo(newstate role) {
-	DPrintf(LOG1, rf.me, " converted from %v to %v ", rf.state, newstate)
+	DPrintf(SUPE, rf.me, " converted from %v to %v ", rf.state, newstate)
 	switch newstate {
 	case CANDIDATE:
+		rf.resetTimer() // in case this node becomes a FOLLOWER immediately
 		rf.state = CANDIDATE
 		//start election
 		rf.currentTerm += 1
 		rf.votedFor = rf.me
 	case FOLLOWER:
-		rf.resetTimer()
+		//rf.resetTimer()
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 	case LEADER:
@@ -412,38 +414,44 @@ func (rf *Raft) SendAllVoteReq() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			send := &RequestVoteArgs{
-				Term:        rf.currentTerm,
-				CandidateId: rf.me,
+				Term:         rf.currentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: rf.log[len(rf.log)-1].Index,
+				LastLogTerm:  rf.log[len(rf.log)-1].Term,
 			}
 			go rf.sendRequestVote(i, send)
 		}
 	}
 }
 
+func (rf *Raft) buildSendAppendEntries(i int) {
+	entries := []Log{}
+	if rf.matchIndex[i] != -1 {
+		entries = getTail(rf.log, rf.matchIndex[i])
+	} //else,  no match information on i yet, do not send all entries to reduce IO cost
+	send := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		Leaderid:     rf.me,
+		Entries:      entries,
+		PrevLogIndex: rf.log[rf.nextIndex[i]-1].Index,
+		PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
+		LeaderCommit: rf.commitIndex,
+	}
+	// This packet might be lost, we should not update nextIndex or matchIndex here
+	go rf.sendAppendEntries(i, send)
+}
+
 // this is non-blocking, should only be called within mutex
 func (rf *Raft) BroadcastAppendEntries() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			entries := []Log{}
-			if rf.matchIndex[i] != -1 {
-				entries = getTail(rf.log, rf.matchIndex[i])
-			} //else,  no match information on i yet, do not send all entries to reduce IO cost
-			send := &AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				Leaderid:     rf.me,
-				Entries:      entries,
-				PrevLogIndex: rf.log[rf.nextIndex[i]-1].Index,
-				PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
-				LeaderCommit: rf.commitIndex,
-			}
-			// This packet might be lost, we should not update nextIndex or matchIndex here
-			go rf.sendAppendEntries(i, send)
+			rf.buildSendAppendEntries(i)
 		}
 	}
 }
 
 func voteTimeout() time.Duration {
-	ms := 50 + 2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW + 50
+	ms := 2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -485,9 +493,8 @@ func (rf *Raft) gatherVote() {
 	}
 }
 
-
 func (rf *Raft) tryLeaderCommit(n int) {
-	for i:= n;i>rf.commitIndex;i--{
+	for i := n; i > rf.commitIndex; i-- {
 		if rf.log[i].Term != rf.currentTerm {
 			return
 		}
@@ -498,10 +505,10 @@ func (rf *Raft) tryLeaderCommit(n int) {
 }
 
 // should only be called within mutex
-func (rf *Raft) tryCommitIDX(n int) bool{
+func (rf *Raft) tryCommitIDX(n int) bool {
 	nMatched := 0
-	for i:=0;i<len(rf.peers);i++{
-		if i!= rf.me && rf.matchIndex[i] >= n{
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me && rf.matchIndex[i] >= n {
 			nMatched += 1
 		}
 	}
@@ -512,7 +519,7 @@ func (rf *Raft) tryCommitIDX(n int) bool{
 		}
 		rf.commitIndex = n
 		return true
-	}else{
+	} else {
 		return false
 	}
 }
@@ -533,12 +540,14 @@ func (rf *Raft) handleAppendReply() {
 			server := replyHelper.server
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
+				rf.resetTimer()
 				rf.ConvertTo(FOLLOWER)
 			} else { // reply.Term == rf.currentTerm
 				success := reply.Success
 				if success == false {
-					// match index is not found,
+					// match index is not found, we need to quickly resend and check again
 					rf.nextIndex[server] -= 1
+					rf.buildSendAppendEntries(server) // quickly resend
 				} else {
 					rf.matchIndex[server] = replyHelper.prevLogIndex
 					if replyHelper.entriesMaxIndex != 0 {
@@ -546,7 +555,7 @@ func (rf *Raft) handleAppendReply() {
 						rf.nextIndex[server] = replyHelper.entriesMaxIndex + 1
 						rf.matchIndex[server] = replyHelper.entriesMaxIndex
 					}
-					rf.tryLeaderCommit( rf.matchIndex[server] )
+					rf.tryLeaderCommit(rf.matchIndex[server])
 				}
 			}
 		}
@@ -647,7 +656,7 @@ const (
 	FOLLOWER        role = 0
 	CANDIDATE       role = 1
 	LEADER          role = 2
-	HB_INTERVAL_RAW      = 180
+	HB_INTERVAL_RAW      = 150
 	HB_INTERVAL          = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
@@ -684,6 +693,11 @@ func (log Log) String() string {
 // given a Log array, A, extend at index B
 func extend(A []Log, B []Log) []Log {
 	if len(B) == 0 {
+		return A
+	}
+	lastLogInB := B[len(B) - 1]
+	lastLogInA := A[len(A) - 1]
+	if lastLogInA == lastLogInB{
 		return A
 	}
 	start := B[0].Index
