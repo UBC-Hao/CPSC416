@@ -367,6 +367,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Index:   index,
 		}
 		rf.log = append(rf.log, newlog)
+		DPrintf(LOG3, rf.me, "START COMMIT %v", index)
 	}
 	return index, term, isLeader
 }
@@ -451,10 +452,10 @@ func (rf *Raft) buildSendAppendEntries(i int) {
 }
 
 // this is non-blocking, should only be called within mutex
-func (rf *Raft) BroadcastAppendEntries() {
+func (rf *Raft) BroadcastAppendEntries(force bool) {
 	deadline := time.Now().Add(-HB_INTERVAL)
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me && rf.lastSend[i].Before(deadline) {
+		if i != rf.me && (rf.lastSend[i].Before(deadline) || force){
 			rf.buildSendAppendEntries(i)
 		}
 	}
@@ -504,13 +505,17 @@ func (rf *Raft) gatherVote() {
 }
 
 func (rf *Raft) tryLeaderCommit(n int) {
+	before := rf.commitIndex
 	for i := n; i > rf.commitIndex; i-- {
 		if rf.log[i].Term != rf.currentTerm {
-			return
+			break
 		}
 		if rf.tryCommitIDX(i) {
-			return
+			break
 		}
+	}
+	if rf.commitIndex != before{
+		rf.BroadcastAppendEntries(true)
 	}
 }
 
@@ -596,7 +601,7 @@ func (rf *Raft) ticker() {
 		// Leader, send heartbeat
 		switch rf.state {
 		case LEADER:
-			rf.BroadcastAppendEntries()
+			rf.BroadcastAppendEntries(false)
 			rf.mu.Unlock()
 			time.Sleep(30 * time.Millisecond)
 			continue
