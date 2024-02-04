@@ -79,6 +79,7 @@ type Raft struct {
 	voteChan     chan *RequestVoteReply
 	appendChan   chan *AppendEntriesReplyHelper
 	applyMsgChan chan ApplyMsg
+	lastSend     []time.Time
 }
 
 // for debug
@@ -158,6 +159,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  //current term for leader to update itself
 	Success bool //
+	NextTry int // possible match index
 }
 
 type AppendEntriesReplyHelper struct {
@@ -170,7 +172,7 @@ type AppendEntriesReplyHelper struct {
 
 // executed by the nodes reachable
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	DPrintf(APPE, rf.me, "<- AppendEntries(%v, %v)", args.Term, args.Leaderid)
+	DPrintf(LOG3, rf.me, "<- AppendEntries(%v, %v)", args.Term, args.Leaderid)
 	DPrintf(APPE, rf.me, "PlogIdx: %v, Entries(%v)", args.PrevLogIndex, args.Entries)
 	//
 	rf.mu.Lock()
@@ -179,9 +181,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf(LOG2, rf.me, "STALE APPEND")
 		//stale
 		reply.Term = rf.currentTerm
-		reply.Success = true
+		reply.Success = false
 	} else {
-		if args.Term > rf.currentTerm {
+		if args.Term >= rf.currentTerm {
+			// == case:  It might be a current term Candidate,  now a leader is born, stop asking for votes
 			rf.currentTerm = args.Term
 			rf.resetTimer()
 			rf.ConvertTo(FOLLOWER)
@@ -192,9 +195,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//    prevLogIndex whose term matches prevLogTerm
 		if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			reply.Success = false
+			// we implement fast backtrack
+			reply.NextTry = fast_backtrack(rf.log) + 1
 		} else {
 			if len(args.Entries) != 0 {
-				rf.log = extend(rf.log, args.Entries)
+				rf.log = extend(rf.log, args.Entries) //this will check for conflicting!! if not , will not update!!
 			}
 			rf.checkValid()
 			if args.LeaderCommit > rf.commitIndex {
@@ -203,9 +208,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if lastIndex < rf.commitIndex {
 					newCommitIdx = lastIndex
 				}
+				//t1 := time.Now()
 				for i := rf.commitIndex + 1; i <= newCommitIdx; i++ {
 					rf.commit(rf.log[i])
 				}
+				//t2 := time.Now()
+				//DPrintf(SUPE, rf.me, "COMMIT TIME %v", t2.Sub(t1).Milliseconds())
 
 				rf.commitIndex = newCommitIdx
 			}
@@ -425,6 +433,7 @@ func (rf *Raft) SendAllVoteReq() {
 }
 
 func (rf *Raft) buildSendAppendEntries(i int) {
+	rf.lastSend[i] = time.Now()
 	entries := []Log{}
 	if rf.matchIndex[i] != -1 {
 		entries = getTail(rf.log, rf.matchIndex[i])
@@ -443,8 +452,9 @@ func (rf *Raft) buildSendAppendEntries(i int) {
 
 // this is non-blocking, should only be called within mutex
 func (rf *Raft) BroadcastAppendEntries() {
+	deadline := time.Now().Add(-HB_INTERVAL)
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me {
+		if i != rf.me && rf.lastSend[i].Before(deadline) {
 			rf.buildSendAppendEntries(i)
 		}
 	}
@@ -546,7 +556,16 @@ func (rf *Raft) handleAppendReply() {
 				success := reply.Success
 				if success == false {
 					// match index is not found, we need to quickly resend and check again
-					rf.nextIndex[server] -= 1
+					// rf.nextIndex[server] = replyHelper.prevLogIndex
+					// replies might not be in the seq time order
+					//assert(reply.NextTry != 0)
+					if rf.nextIndex[server] > replyHelper.prevLogIndex{
+						rf.nextIndex[server] = reply.NextTry
+					}
+					//if rf.nextIndex[server] > replyHelper.prevLogIndex{
+					//	rf.nextIndex[server] = replyHelper.prevLogIndex
+					//}
+					 
 					rf.buildSendAppendEntries(server) // quickly resend
 				} else {
 					rf.matchIndex[server] = replyHelper.prevLogIndex
@@ -555,7 +574,12 @@ func (rf *Raft) handleAppendReply() {
 						rf.nextIndex[server] = replyHelper.entriesMaxIndex + 1
 						rf.matchIndex[server] = replyHelper.entriesMaxIndex
 					}
+					t1 := time.Now()
 					rf.tryLeaderCommit(rf.matchIndex[server])
+					t2 := time.Now()
+					if t1.Add(10*time.Millisecond).Before(t2){
+						DPrintf(LOG3, rf.me, "WARNING!!!!!!! TOO LONG ! %v", t2.Sub(t1).Milliseconds())
+					}
 				}
 			}
 		}
@@ -568,6 +592,7 @@ func (rf *Raft) resetTimer() {
 	rf.lastHB = time.Now()
 }
 
+
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here (2A)
@@ -576,10 +601,9 @@ func (rf *Raft) ticker() {
 		// Leader, send heartbeat
 		switch rf.state {
 		case LEADER:
-			DPrintf(LOG1, rf.me, "LEADER SPREADS HB, term = %v", rf.currentTerm)
 			rf.BroadcastAppendEntries()
 			rf.mu.Unlock()
-			time.Sleep(HB_INTERVAL)
+			time.Sleep(30 * time.Millisecond)
 			continue
 
 		case FOLLOWER:
@@ -637,6 +661,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.F = len(peers) / 2
 	rf.log = []Log{{}} // Starts from 1
 	rf.applyMsgChan = applyCh
+	rf.lastSend = make([]time.Time, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.lastSend[i] = time.Now()
+	}
 	assert(len(rf.log) == 1)
 
 	// initialize from state persisted before a crash
@@ -656,7 +684,7 @@ const (
 	FOLLOWER        role = 0
 	CANDIDATE       role = 1
 	LEADER          role = 2
-	HB_INTERVAL_RAW      = 150
+	HB_INTERVAL_RAW      = 130
 	HB_INTERVAL          = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
@@ -695,10 +723,12 @@ func extend(A []Log, B []Log) []Log {
 	if len(B) == 0 {
 		return A
 	}
-	lastLogInB := B[len(B) - 1]
-	lastLogInA := A[len(A) - 1]
-	if lastLogInA == lastLogInB{
-		return A
+	//check for conflicting
+	lastLogInB := B[len(B)-1]
+	if len(A)-1 >= lastLogInB.Index{
+		if A[lastLogInB.Index].Term == lastLogInB.Term{
+			return A
+		}
 	}
 	start := B[0].Index
 	A = A[:start]
@@ -714,6 +744,17 @@ func getTail(A []Log, index int) []Log {
 		copy(ret, A[index+1:])
 		return ret
 	}
+}
+
+//returns the last index which is not the same as the last term
+func fast_backtrack(A []Log) int{
+	lastTerm := A[len(A) - 1].Term
+	for i:=len(A)-1;i>=0;i--{
+		if lastTerm != A[i].Term{
+			return i
+		} 
+	}
+	return 0
 }
 
 // debug function for checking if the log is valid

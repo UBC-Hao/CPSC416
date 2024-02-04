@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -496,7 +498,7 @@ func TestBackup2B(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
-
+	
 	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
@@ -509,6 +511,7 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
+	
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -519,12 +522,14 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-
+	t1:= time.Now()
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
+	t2:=time.Now()
+	fmt.Printf("Preparation0 Elapsed %v\n", t2.Sub(t1).Seconds())
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
 	other := (leader1 + 2) % servers
@@ -539,6 +544,8 @@ func TestBackup2B(t *testing.T) {
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
+	t2 = time.Now()
+	fmt.Printf("Preparation Elapsed %v\n", t2.Sub(t1).Seconds())
 
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
@@ -547,17 +554,24 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
+	cfg.one(rand.Int(), 3, true)
+	t6 := time.Now()
+	fmt.Printf("One : %v\n", t6.Sub(t2).Seconds())
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	t3 := time.Now()
+	fmt.Printf("Preparation2 Elapsed %v\n", t3.Sub(t2).Seconds())
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
+	t4 := time.Now()
+	fmt.Printf("Preparation2 Elapsed %v\n", t4.Sub(t3).Seconds())
 
 	cfg.end()
 }

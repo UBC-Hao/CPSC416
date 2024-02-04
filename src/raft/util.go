@@ -44,7 +44,7 @@ func DPrintf(topic ptopic, me int, format string, a ...interface{}) (n int, err 
 	if topic == FATAL {
 		log.Fatal(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format)
 	}
-	if Debug{
+	if Debug {
 		log.Printf(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format, a...)
 	}
 	return
