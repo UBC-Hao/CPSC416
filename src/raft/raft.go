@@ -165,7 +165,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = false
 	} else {
-		if args.Term > rf.currentTerm {
+		if args.Term >= rf.currentTerm {
 			rf.currentTerm = args.Term
 			rf.ConvertTo(FOLLOWER)
 		}
