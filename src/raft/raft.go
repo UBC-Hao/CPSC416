@@ -574,12 +574,7 @@ func (rf *Raft) handleAppendReply() {
 						rf.nextIndex[server] = replyHelper.entriesMaxIndex + 1
 						rf.matchIndex[server] = replyHelper.entriesMaxIndex
 					}
-					t1 := time.Now()
 					rf.tryLeaderCommit(rf.matchIndex[server])
-					t2 := time.Now()
-					if t1.Add(10*time.Millisecond).Before(t2){
-						DPrintf(LOG3, rf.me, "WARNING!!!!!!! TOO LONG ! %v", t2.Sub(t1).Milliseconds())
-					}
 				}
 			}
 		}
