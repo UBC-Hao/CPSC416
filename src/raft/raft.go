@@ -79,6 +79,7 @@ type Raft struct {
 	voteChan     chan *RequestVoteReply
 	appendChan   chan *AppendEntriesReplyHelper
 	applyMsgChan chan ApplyMsg
+	cond *sync.Cond
 	lastSend     []time.Time
 }
 
@@ -209,13 +210,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					newCommitIdx = lastIndex
 				}
 				//t1 := time.Now()
-				for i := rf.commitIndex + 1; i <= newCommitIdx; i++ {
-					rf.commit(rf.log[i])
-				}
+				//for i := rf.commitIndex + 1; i <= newCommitIdx; i++ {
+				//	rf.commit(rf.log[i])
+				//}
 				//t2 := time.Now()
 				//DPrintf(SUPE, rf.me, "COMMIT TIME %v", t2.Sub(t1).Milliseconds())
 
 				rf.commitIndex = newCommitIdx
+				rf.cond.Signal()
 			}
 			reply.Success = true
 		}
@@ -515,7 +517,24 @@ func (rf *Raft) tryLeaderCommit(n int) {
 		}
 	}
 	if rf.commitIndex != before{
+		rf.cond.Signal()
 		rf.BroadcastAppendEntries(true) // tell every node to commit 
+	}
+}
+
+//blocking function to apply logs after committing
+func (rf *Raft) applyLogs(){
+	for {
+		rf.mu.Lock()
+		for rf.commitIndex <= rf.lastApplied{
+			rf.cond.Wait()
+		}
+		// rf.commitIndex > rf.lastApplied
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			rf.apply(rf.log[i])
+		}
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
 	}
 }
 
@@ -529,9 +548,9 @@ func (rf *Raft) tryCommitIDX(n int) bool {
 	}
 	if nMatched >= rf.F {
 		//already copied on majority, ok to commit
-		for i := rf.commitIndex + 1; i <= n; i++ {
-			rf.commit(rf.log[i])
-		}
+		//for i := rf.commitIndex + 1; i <= n; i++ {
+		//	rf.commit(rf.log[i])
+		//}
 		rf.commitIndex = n
 		return true
 	} else {
@@ -658,6 +677,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []Log{{}} // Starts from 1
 	rf.applyMsgChan = applyCh
 	rf.lastSend = make([]time.Time, len(rf.peers))
+	rf.cond = sync.NewCond(&rf.mu)
 	for i := 0; i < len(rf.peers); i++ {
 		rf.lastSend[i] = time.Now()
 	}
@@ -669,6 +689,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.handleAppendReply()
+	go rf.applyLogs()
 
 	return rf
 }
@@ -770,8 +791,8 @@ func assert(a bool) {
 	}
 }
 
-func (rf *Raft) commit(log Log) {
-	DPrintf(LOG3, rf.me, "COMMIT LOG %v", log)
+func (rf *Raft) apply(log Log) {
+	DPrintf(LOG3, rf.me, "APPLY LOG %v", log)
 	rf.applyMsgChan <- ApplyMsg{
 		CommandValid: true,
 		Command:      log.Command,
