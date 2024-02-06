@@ -195,8 +195,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//    prevLogIndex whose term matches prevLogTerm
 		if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			reply.Success = false
-			// we implement fast backtrack
-			reply.NextTry = fast_backtrack(rf.log) + 1
+			// TODO: we implement fast backtrack
+			// reply.NextTry = fast_backtrack(rf.log) + 1
 		} else {
 			if len(args.Entries) != 0 {
 				rf.log = extend(rf.log, args.Entries) //this will check for conflicting!! if not , will not update!!
@@ -515,7 +515,7 @@ func (rf *Raft) tryLeaderCommit(n int) {
 		}
 	}
 	if rf.commitIndex != before{
-		rf.BroadcastAppendEntries(true)
+		rf.BroadcastAppendEntries(true) // tell every node to commit 
 	}
 }
 
@@ -561,18 +561,15 @@ func (rf *Raft) handleAppendReply() {
 				success := reply.Success
 				if success == false {
 					// match index is not found, we need to quickly resend and check again
-					// rf.nextIndex[server] = replyHelper.prevLogIndex
-					// replies might not be in the seq time order
+					// rf.nextIndex[server] = replyHelper.prevLogIndex 
+					// replies might not be in the seq time order, we need to check first
 					//assert(reply.NextTry != 0)
-					if rf.nextIndex[server] > replyHelper.prevLogIndex{
-						rf.nextIndex[server] = reply.NextTry
+					if rf.nextIndex[server] > replyHelper.prevLogIndex{ 
+						rf.nextIndex[server] -= 1 
 					}
-					//if rf.nextIndex[server] > replyHelper.prevLogIndex{
-					//	rf.nextIndex[server] = replyHelper.prevLogIndex
-					//}
 					 
 					rf.buildSendAppendEntries(server) // quickly resend
-				} else {
+				} else if rf.matchIndex[server] <= replyHelper.prevLogIndex{//in case of stale request
 					rf.matchIndex[server] = replyHelper.prevLogIndex
 					if replyHelper.entriesMaxIndex != 0 {
 						// this means some entries are sent to the server and is successfully updated
@@ -595,7 +592,6 @@ func (rf *Raft) resetTimer() {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		// Your code here (2A)
 		// Check if a leader election should be started.
 		rf.mu.Lock()
 		// Leader, send heartbeat
@@ -783,15 +779,3 @@ func (rf *Raft) commit(log Log) {
 	}
 }
 
-/*
-
-for i := rf.commitIndex + 1; i <= minMatch; i++ {
-			DPrintf(LOG3, rf.me, "LEADER COMMIT LOG %v", rf.log[i])
-			rf.applyMsgChan <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[i],
-				CommandIndex: i,
-			}
-		}
-
-*/
