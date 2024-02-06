@@ -1,12 +1,12 @@
 #!/bin/bash
 
 
-for i in {1..1}
+for i in {1..30}
 do
-   go test -run 2A >> output.txt
+   go test -run 2B >> output.txt
 done
 
-for i in {1..10}
+for i in {1..20}
 do
    go test -run 2B >> output.txt
 done

@@ -79,7 +79,7 @@ type Raft struct {
 	voteChan     chan *RequestVoteReply
 	appendChan   chan *AppendEntriesReplyHelper
 	applyMsgChan chan ApplyMsg
-	cond *sync.Cond
+	cond         *sync.Cond
 	lastSend     []time.Time
 }
 
@@ -160,7 +160,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  //current term for leader to update itself
 	Success bool //
-	NextTry int // possible match index
+
+	XTerm  int //:  term in the conflicting entry (if any)
+	XIndex int //: index of first entry with that term (if any)
+	XLen   int //log length
 }
 
 type AppendEntriesReplyHelper struct {
@@ -194,10 +197,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// reply false if log doesn't contain an entry at
 		//    prevLogIndex whose term matches prevLogTerm
-		if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		if (rf.lastLogIndex() < args.PrevLogIndex) || (rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 			reply.Success = false
-			// TODO: we implement fast backtrack
-			// reply.NextTry = fast_backtrack(rf.log) + 1
+			if rf.lastLogIndex() < args.PrevLogIndex {
+				reply.XLen = len(rf.log)
+				reply.XTerm = -1
+			} else {
+				reply.XTerm = rf.log[args.PrevLogIndex].Term
+				xindex := rf.log[args.PrevLogIndex].Index
+				for rf.log[xindex].Term == reply.XTerm {
+					xindex -= 1
+				}
+				reply.XIndex = xindex + 1
+			}
+
 		} else {
 			if len(args.Entries) != 0 {
 				rf.log = extend(rf.log, args.Entries) //this will check for conflicting!! if not , will not update!!
@@ -209,12 +222,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if lastIndex < rf.commitIndex {
 					newCommitIdx = lastIndex
 				}
-				//t1 := time.Now()
-				//for i := rf.commitIndex + 1; i <= newCommitIdx; i++ {
-				//	rf.commit(rf.log[i])
-				//}
-				//t2 := time.Now()
-				//DPrintf(SUPE, rf.me, "COMMIT TIME %v", t2.Sub(t1).Milliseconds())
 
 				rf.commitIndex = newCommitIdx
 				rf.cond.Signal()
@@ -457,7 +464,7 @@ func (rf *Raft) buildSendAppendEntries(i int) {
 func (rf *Raft) BroadcastAppendEntries(force bool) {
 	deadline := time.Now().Add(-HB_INTERVAL)
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me && (rf.lastSend[i].Before(deadline) || force){
+		if i != rf.me && (rf.lastSend[i].Before(deadline) || force) {
 			rf.buildSendAppendEntries(i)
 		}
 	}
@@ -516,17 +523,17 @@ func (rf *Raft) tryLeaderCommit(n int) {
 			break
 		}
 	}
-	if rf.commitIndex != before{
+	if rf.commitIndex != before {
 		rf.cond.Signal()
-		rf.BroadcastAppendEntries(true) // tell every node to commit 
+		rf.BroadcastAppendEntries(true) // tell every node to commit
 	}
 }
 
-//blocking function to apply logs after committing
-func (rf *Raft) applyLogs(){
+// blocking function to apply logs after committing
+func (rf *Raft) applyLogs() {
 	for {
 		rf.mu.Lock()
-		for rf.commitIndex <= rf.lastApplied{
+		for rf.commitIndex <= rf.lastApplied {
 			rf.cond.Wait()
 		}
 		// rf.commitIndex > rf.lastApplied
@@ -578,17 +585,27 @@ func (rf *Raft) handleAppendReply() {
 				rf.ConvertTo(FOLLOWER)
 			} else { // reply.Term == rf.currentTerm
 				success := reply.Success
-				if success == false {
+				if !success {
 					// match index is not found, we need to quickly resend and check again
-					// rf.nextIndex[server] = replyHelper.prevLogIndex 
+					// rf.nextIndex[server] = replyHelper.prevLogIndex
 					// replies might not be in the seq time order, we need to check first
-					//assert(reply.NextTry != 0)
-					if rf.nextIndex[server] > replyHelper.prevLogIndex{ 
-						rf.nextIndex[server] -= 1 
+					if rf.matchIndex[server] <= replyHelper.prevLogIndex {
+						//rf.nextIndex[server] -= 1
+						//Implement quick backup
+						if reply.XTerm != -1 {
+							ok, idx := hasTerm(rf.log, reply.XTerm)
+							if !ok {
+								rf.nextIndex[server] = reply.XIndex
+							} else {
+								rf.nextIndex[server] = idx
+							}
+						} else {
+							//follower's log is too short
+							rf.nextIndex[server] = reply.XLen
+						}
 					}
-					 
 					rf.buildSendAppendEntries(server) // quickly resend
-				} else if rf.matchIndex[server] <= replyHelper.prevLogIndex{//in case of stale request
+				} else if rf.matchIndex[server] <= replyHelper.prevLogIndex { //in case of stale request
 					rf.matchIndex[server] = replyHelper.prevLogIndex
 					if replyHelper.entriesMaxIndex != 0 {
 						// this means some entries are sent to the server and is successfully updated
@@ -607,7 +624,6 @@ func (rf *Raft) handleAppendReply() {
 func (rf *Raft) resetTimer() {
 	rf.lastHB = time.Now()
 }
-
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
@@ -742,8 +758,8 @@ func extend(A []Log, B []Log) []Log {
 	}
 	//check for conflicting
 	lastLogInB := B[len(B)-1]
-	if len(A)-1 >= lastLogInB.Index{
-		if A[lastLogInB.Index].Term == lastLogInB.Term{
+	if len(A)-1 >= lastLogInB.Index {
+		if A[lastLogInB.Index].Term == lastLogInB.Term {
 			return A
 		}
 	}
@@ -763,15 +779,20 @@ func getTail(A []Log, index int) []Log {
 	}
 }
 
-//returns the last index which is not the same as the last term
-func fast_backtrack(A []Log) int{
-	lastTerm := A[len(A) - 1].Term
-	for i:=len(A)-1;i>=0;i--{
-		if lastTerm != A[i].Term{
-			return i
-		} 
+func hasTerm(A []Log, term int) (bool, int) {
+	has := false
+	for i := len(A) - 1; i >= 0; i-- {
+		if A[i].Term == term {
+			has = true
+		} else if A[i].Term < term {
+			if has == true {
+				return true, i + 1
+			} else {
+				return false, -1
+			}
+		}
 	}
-	return 0
+	return false, -1
 }
 
 // debug function for checking if the log is valid
@@ -799,4 +820,3 @@ func (rf *Raft) apply(log Log) {
 		CommandIndex: log.Index,
 	}
 }
-
