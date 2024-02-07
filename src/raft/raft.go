@@ -88,7 +88,7 @@ type Raft struct {
 
 // for debug
 func (rf *Raft) String() string {
-	return fmt.Sprintf("(me %v,term: %v, state: %v, logs: %v,commitIdx: %v)", rf.me, rf.currentTerm, rf.state, rf.log, rf.commitIndex)
+	return fmt.Sprintf("(me %v,term: %v, state: %v, logs: %v, commitIdx: %v)", rf.me, rf.currentTerm, rf.state, rf.log, rf.commitIndex)
 }
 
 // return currentTerm and whether this server
@@ -139,6 +139,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = logs
+		rf.checkValid()
 	}
 }
 
@@ -191,9 +192,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = false
 	} else {
-		if args.Term >= rf.currentTerm {
-			// == case:  It might be a current term Candidate,  now a leader is born, stop asking for votes
+		if args.Term > rf.currentTerm {
+			rf.resetTimer()
 			rf.currentTerm = args.Term
+			rf.ConvertTo(FOLLOWER)
+			rf.votedFor = -1
+		}else if args.Term == rf.currentTerm {
+			// == case:  It might be a current term Candidate,  now a leader is born, stop asking for votes
 			rf.resetTimer()
 			rf.ConvertTo(FOLLOWER)
 		}
@@ -214,11 +219,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 				reply.XIndex = xindex + 1
 			}
-			if rf.lastLogIndex() < args.PrevLogIndex{
-				DPrintf(LOG3, rf.me, "<- Append Fail, R1(%v,%v) ",rf.lastLogIndex(),args.PrevLogIndex)
-			}else{
+			if rf.lastLogIndex() < args.PrevLogIndex {
+				DPrintf(LOG3, rf.me, "<- Append Fail, R1(%v,%v) ", rf.lastLogIndex(), args.PrevLogIndex)
+			} else {
 				DPrintf(LOG3, rf.me, "STAT: %v", rf)
-				DPrintf(LOG3, rf.me, "<- Append Fail, R2(%v,%v,%v,%v,%v) ",args.PrevLogIndex,rf.log[args.PrevLogIndex].Term,args.PrevLogTerm,reply.XTerm, reply.XIndex)
+				DPrintf(LOG3, rf.me, "<- Append Fail, R2(%v,%v,%v,%v,%v) ", args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
 			}
 
 		} else {
@@ -427,7 +432,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 		rf.persist()
 	case FOLLOWER:
 		//rf.resetTimer()
-		rf.votedFor = -1
+		//rf.votedFor = -1
 		rf.state = FOLLOWER
 		// perisist of converting to follower is handled outside for efficiency
 	case LEADER:
@@ -506,6 +511,7 @@ func (rf *Raft) gatherVote() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.ConvertTo(FOLLOWER)
+				rf.votedFor = -1
 				rf.persist()
 				rf.mu.Unlock()
 				return
@@ -551,7 +557,7 @@ func (rf *Raft) applyLogs() {
 		for rf.commitIndex <= rf.lastApplied {
 			rf.cond.Wait()
 		}
-		DPrintf(LOG1, rf.me, "TRY TO APPLY LOGS (%v,%v,%v)",rf.commitIndex, rf.lastApplied, rf.log)
+		DPrintf(LOG1, rf.me, "TRY TO APPLY LOGS (%v,%v,%v)", rf.commitIndex, rf.lastApplied, rf.log)
 		// rf.commitIndex > rf.lastApplied
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			rf.apply(rf.log[i])
@@ -599,6 +605,7 @@ func (rf *Raft) handleAppendReply() {
 				rf.currentTerm = reply.Term
 				rf.resetTimer()
 				rf.ConvertTo(FOLLOWER)
+				rf.votedFor = -1
 				rf.persist()
 			} else { // reply.Term == rf.currentTerm
 				success := reply.Success
@@ -618,8 +625,8 @@ func (rf *Raft) handleAppendReply() {
 								// while leader is             [ 3 3 3 3 3 ]
 								//rf.nextIndex[server] = rf.nextIndex[server] - 1
 								//if rf.nextIndex[server]  > idx{
-									DPrintf(LOG4, rf.me, "%v %v", idx, rf.log)
-									rf.nextIndex[server] = idx
+								DPrintf(LOG4, rf.me, "%v %v", idx, rf.log)
+								rf.nextIndex[server] = idx
 								//}
 							}
 						} else {
