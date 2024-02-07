@@ -467,7 +467,7 @@ func (rf *Raft) SendAllVoteReq() {
 
 func (rf *Raft) buildSendAppendEntries(i int) {
 	rf.lastSend[i] = time.Now()
-	entries := getTail(rf.log, rf.matchIndex[i])
+	entries := getTail(rf.log, rf.nextIndex[i]-1)
 	send := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		Leaderid:     rf.me,
