@@ -866,6 +866,12 @@ func TestFigure82C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
+	DPrintfline()
+	for i := 0; i < servers; i++ {
+		if cfg.rafts[i] != nil {
+			DPrintf(LOG4, i, "my stats %v", cfg.rafts[i])
+		}
+	}
 
 	cfg.one(rand.Int(), servers, true)
 

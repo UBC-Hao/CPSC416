@@ -19,13 +19,16 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	// "cpsc416/labgob"
+	"cpsc416/labgob"
 	"cpsc416/labrpc"
 )
 
@@ -109,13 +112,13 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -123,19 +126,20 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []Log
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		log.Print("FAIL")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = logs
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -210,8 +214,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 				reply.XIndex = xindex + 1
 			}
+			if rf.lastLogIndex() < args.PrevLogIndex{
+				DPrintf(LOG3, rf.me, "<- Append Fail, R1(%v,%v) ",rf.lastLogIndex(),args.PrevLogIndex)
+			}else{
+				DPrintf(LOG3, rf.me, "STAT: %v", rf)
+				DPrintf(LOG3, rf.me, "<- Append Fail, R2(%v,%v,%v,%v,%v) ",args.PrevLogIndex,rf.log[args.PrevLogIndex].Term,args.PrevLogTerm,reply.XTerm, reply.XIndex)
+			}
 
 		} else {
+			DPrintf(LOG3, rf.me, "<- Append Success")
 			if len(args.Entries) != 0 {
 				rf.log = extend(rf.log, args.Entries) //this will check for conflicting!! if not , will not update!!
 			}
@@ -233,6 +244,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//also change last recv
 		rf.resetTimer()
 		DPrintf(LOG2, rf.me, "Beats sent from %v", args.Leaderid)
+		rf.persist()
 	}
 }
 
@@ -306,6 +318,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 		}
 	}
+	rf.persist()
 
 }
 
@@ -377,6 +390,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		rf.log = append(rf.log, newlog)
 		DPrintf(LOG3, rf.me, "START COMMIT %v", index)
+		rf.persist()
 	}
 	return index, term, isLeader
 }
@@ -410,10 +424,12 @@ func (rf *Raft) ConvertTo(newstate role) {
 		//start election
 		rf.currentTerm += 1
 		rf.votedFor = rf.me
+		rf.persist()
 	case FOLLOWER:
 		//rf.resetTimer()
 		rf.votedFor = -1
 		rf.state = FOLLOWER
+		// perisist of converting to follower is handled outside for efficiency
 	case LEADER:
 		rf.votedFor = rf.me
 		rf.state = LEADER
@@ -423,6 +439,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 			rf.nextIndex[i] = len(rf.log)
 		}
 		rf.matchIndex = make([]int, 2*rf.F+1)
+		rf.persist()
 		//rf.SendHeartBeats() (not neccessary, ticker will be executed after this)
 	}
 }
@@ -444,10 +461,7 @@ func (rf *Raft) SendAllVoteReq() {
 
 func (rf *Raft) buildSendAppendEntries(i int) {
 	rf.lastSend[i] = time.Now()
-	entries := []Log{}
-	if rf.matchIndex[i] != -1 {
-		entries = getTail(rf.log, rf.matchIndex[i])
-	} //else,  no match information on i yet, do not send all entries to reduce IO cost
+	entries := getTail(rf.log, rf.matchIndex[i])
 	send := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		Leaderid:     rf.me,
@@ -492,6 +506,7 @@ func (rf *Raft) gatherVote() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.ConvertTo(FOLLOWER)
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
@@ -536,6 +551,7 @@ func (rf *Raft) applyLogs() {
 		for rf.commitIndex <= rf.lastApplied {
 			rf.cond.Wait()
 		}
+		DPrintf(LOG1, rf.me, "TRY TO APPLY LOGS (%v,%v,%v)",rf.commitIndex, rf.lastApplied, rf.log)
 		// rf.commitIndex > rf.lastApplied
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			rf.apply(rf.log[i])
@@ -583,6 +599,7 @@ func (rf *Raft) handleAppendReply() {
 				rf.currentTerm = reply.Term
 				rf.resetTimer()
 				rf.ConvertTo(FOLLOWER)
+				rf.persist()
 			} else { // reply.Term == rf.currentTerm
 				success := reply.Success
 				if !success {
@@ -597,7 +614,13 @@ func (rf *Raft) handleAppendReply() {
 							if !ok {
 								rf.nextIndex[server] = reply.XIndex
 							} else {
-								rf.nextIndex[server] = idx
+								// it might be possible like   [ 2 3 3 3 3 ]
+								// while leader is             [ 3 3 3 3 3 ]
+								//rf.nextIndex[server] = rf.nextIndex[server] - 1
+								//if rf.nextIndex[server]  > idx{
+									DPrintf(LOG4, rf.me, "%v %v", idx, rf.log)
+									rf.nextIndex[server] = idx
+								//}
 							}
 						} else {
 							//follower's log is too short
