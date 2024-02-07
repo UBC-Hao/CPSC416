@@ -305,6 +305,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
 			rf.ConvertTo(FOLLOWER) // Do not reset timer here for quickly vote
+			rf.votedFor = -1
 		}
 
 		reply.Term = rf.currentTerm
