@@ -73,6 +73,8 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 
+	X int // the start index of the log, default 0 
+
 	//initialized after becoming a leader.
 	nextIndex  []int
 	matchIndex []int // -1 to indicate the last applid is not found yet
@@ -117,6 +119,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.X)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
 }
@@ -131,14 +134,17 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var logs []Log
+	var X int 
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&logs) != nil {
+		d.Decode(&logs) != nil ||
+		d.Decode(&X) != nil{
 		log.Print("FAIL")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = logs
+		rf.X = X
 		rf.checkValid()
 	}
 }
@@ -148,8 +154,11 @@ func (rf *Raft) readPersist(data []byte) {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf(LOG3, rf.me, "SNAPSHOT %v ", index )
+	rf.X = index 
+	rf.log = rf.log[index:]
 }
 
 // Invoked by leader to replicate log or send heartbeats
@@ -206,15 +215,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// reply false if log doesn't contain an entry at
 		//    prevLogIndex whose term matches prevLogTerm
-		if (rf.lastLogIndex() < args.PrevLogIndex) || (rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		if (rf.lastLogIndex() < args.PrevLogIndex) || (rf.getLog(args.PrevLogIndex).Term != args.PrevLogTerm) {
 			reply.Success = false
 			if rf.lastLogIndex() < args.PrevLogIndex {
-				reply.XLen = len(rf.log)
+				reply.XLen = len(rf.log) + rf.X
 				reply.XTerm = -1
 			} else {
-				reply.XTerm = rf.log[args.PrevLogIndex].Term
-				xindex := rf.log[args.PrevLogIndex].Index
-				for rf.log[xindex].Term == reply.XTerm {
+				reply.XTerm = rf.getLog(args.PrevLogIndex).Term
+				xindex := rf.getLog(args.PrevLogIndex).Index
+				for rf.getLog(xindex).Term == reply.XTerm {
 					xindex -= 1
 				}
 				reply.XIndex = xindex + 1
@@ -223,7 +232,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				DPrintf(LOG3, rf.me, "<- Append Fail, R1(%v,%v) ", rf.lastLogIndex(), args.PrevLogIndex)
 			} else {
 				DPrintf(LOG3, rf.me, "STAT: %v", rf)
-				DPrintf(LOG3, rf.me, "<- Append Fail, R2(%v,%v,%v,%v,%v) ", args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
+				DPrintf(LOG3, rf.me, "<- Append Fail, R2(%v,%v,%v,%v,%v) ", args.PrevLogIndex, rf.getLog(args.PrevLogIndex).Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
 			}
 
 		} else {
@@ -234,7 +243,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.checkValid()
 			if args.LeaderCommit > rf.commitIndex {
 				newCommitIdx := args.LeaderCommit
-				lastIndex := rf.log[len(rf.log)-1].Index
+				lastIndex := rf.lastLogIndex()
 				if lastIndex < rf.commitIndex {
 					newCommitIdx = lastIndex
 				}
@@ -388,14 +397,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = rf.state == LEADER
 	term = rf.currentTerm
 	if isLeader {
-		index = len(rf.log)
+		index = len(rf.log) + rf.X
 		newlog := Log{
 			Command: command,
 			Term:    term,
 			Index:   index,
 		}
 		rf.log = append(rf.log, newlog)
-		DPrintf(LOG3, rf.me, "START COMMIT %v", index)
+		DPrintf(LOG3, rf.me, "START COMMIT %v, x= %v", index, rf.X)
 		rf.persist()
 	}
 	return index, term, isLeader
@@ -442,7 +451,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 		rf.nextIndex = make([]int, 2*rf.F+1)
 		//initialize nextIndex to the last log index + 1 ( = len(rf.log))
 		for i := 0; i < 2*rf.F+1; i++ {
-			rf.nextIndex[i] = len(rf.log)
+			rf.nextIndex[i] = len(rf.log) + rf.X
 		}
 		rf.matchIndex = make([]int, 2*rf.F+1)
 		rf.persist()
@@ -538,7 +547,7 @@ func (rf *Raft) gatherVote() {
 func (rf *Raft) tryLeaderCommit(n int) {
 	before := rf.commitIndex
 	for i := n; i > rf.commitIndex; i-- {
-		if rf.log[i].Term != rf.currentTerm {
+		if rf.getLog(i).Term != rf.currentTerm {
 			break
 		}
 		if rf.tryCommitIDX(i) {
@@ -561,7 +570,7 @@ func (rf *Raft) applyLogs() {
 		DPrintf(LOG1, rf.me, "TRY TO APPLY LOGS (%v,%v,%v)", rf.commitIndex, rf.lastApplied, rf.log)
 		// rf.commitIndex > rf.lastApplied
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			rf.apply(rf.log[i])
+			rf.apply(*rf.getLog(i))
 		}
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
@@ -769,7 +778,7 @@ func (r role) String() string {
 func (rf *Raft) lastLogIndex() int {
 	sz := len(rf.log)
 	sz -= 1
-	return sz
+	return rf.log[sz].Index
 }
 
 type Log struct {
@@ -833,7 +842,7 @@ func (rf *Raft) checkValid() {
 	}
 	log := rf.log
 	for i := 1; i < len(log); i++ {
-		assert(log[i].Index == i)
+		assert(log[i].Index == i + rf.X)
 	}
 }
 
@@ -844,10 +853,15 @@ func assert(a bool) {
 }
 
 func (rf *Raft) apply(log Log) {
-	DPrintf(LOG3, rf.me, "APPLY LOG %v", log)
+	DPrintf(LOG3, rf.me, "APPLY LOG %v...", log)
 	rf.applyMsgChan <- ApplyMsg{
 		CommandValid: true,
 		Command:      log.Command,
 		CommandIndex: log.Index,
 	}
+	DPrintf(LOG3, rf.me, "APPLY LOG %v Done", log)
+}
+
+func (rf *Raft) getLog(index int) *Log{
+	return &rf.log[index - rf.X]
 }
