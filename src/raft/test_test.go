@@ -1156,7 +1156,9 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 		// perhaps send enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		DPrintf(LOG1, sender, "%v requests", nn )
 		for i := 0; i < nn; i++ {
+			DPrintf(LOG1, sender, "-- %v-th request", i)
 			cfg.rafts[sender].Start(rand.Int())
 		}
 

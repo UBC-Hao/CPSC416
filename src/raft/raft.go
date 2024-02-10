@@ -156,9 +156,10 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	assert(index <= rf.commitIndex)
 	DPrintf(LOG3, rf.me, "SNAPSHOT %v ", index )
+	rf.log = rf.log[index - rf.X:]
 	rf.X = index 
-	rf.log = rf.log[index:]
 }
 
 // Invoked by leader to replicate log or send heartbeats
@@ -238,7 +239,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			DPrintf(LOG3, rf.me, "<- Append Success")
 			if len(args.Entries) != 0 {
-				rf.log = extend(rf.log, args.Entries) //this will check for conflicting!! if not , will not update!!
+				rf.extend(args.Entries) //this will check for conflicting!! if not , will not update!!
 			}
 			rf.checkValid()
 			if args.LeaderCommit > rf.commitIndex {
@@ -404,7 +405,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Index:   index,
 		}
 		rf.log = append(rf.log, newlog)
-		DPrintf(LOG3, rf.me, "START COMMIT %v, x= %v", index, rf.X)
+		DPrintf(LOG3, rf.me, "START COMMIT %v, x= %v, cmd=%v", index, rf.X, command)
 		rf.persist()
 	}
 	return index, term, isLeader
@@ -476,13 +477,13 @@ func (rf *Raft) SendAllVoteReq() {
 
 func (rf *Raft) buildSendAppendEntries(i int) {
 	rf.lastSend[i] = time.Now()
-	entries := getTail(rf.log, rf.nextIndex[i]-1)
+	entries := rf.getTail(rf.nextIndex[i]-1)
 	send := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		Leaderid:     rf.me,
 		Entries:      entries,
-		PrevLogIndex: rf.log[rf.nextIndex[i]-1].Index,
-		PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
+		PrevLogIndex: rf.getLog(rf.nextIndex[i]-1).Index, //rf.log[rf.nextIndex[i]-1].Index,
+		PrevLogTerm:  rf.getLog(rf.nextIndex[i]-1).Term,
 		LeaderCommit: rf.commitIndex,
 	}
 	// This packet might be lost, we should not update nextIndex or matchIndex here
@@ -791,31 +792,31 @@ func (log Log) String() string {
 	return fmt.Sprintf("(%v,%v)", log.Index, log.Term)
 }
 
-// given a Log array, A, extend at index B
-func extend(A []Log, B []Log) []Log {
+// given a Log array of raft server rf, extend using B
+func (rf *Raft) extend(B []Log) {
 	if len(B) == 0 {
-		return A
+		return
 	}
 	//check for conflicting
 	lastLogInB := B[len(B)-1]
-	if len(A)-1 >= lastLogInB.Index {
-		if A[lastLogInB.Index].Term == lastLogInB.Term {
-			return A
+	if rf.lastLogIndex() >= lastLogInB.Index {
+		if rf.getLog(lastLogInB.Index).Term == lastLogInB.Term {
+			return
 		}
 	}
 	start := B[0].Index
-	A = A[:start]
-	return append(A, B...)
+	rf.log = rf.log[:start - rf.X]
+	rf.log = append(rf.log, B...)
 }
 
-// given a Log array A, returns A[index + 1:]
-func getTail(A []Log, index int) []Log {
-	if (index + 1) >= len(A) {
+// given a Log array of raft rf, returns rf.log[index + 1:] as if log is complete
+func (rf *Raft) getTail(index int) []Log {
+	if (index + 1) > rf.lastLogIndex() {
 		return []Log{}
 	} else {
-		ret := make([]Log, len(A[index+1:]))
-		copy(ret, A[index+1:])
-		return ret
+		//ret := make([]Log, len(A[index+1:]))
+		//copy(ret, A[index+1:])
+		return rf.log[index+1-rf.X:]
 	}
 }
 
@@ -853,13 +854,16 @@ func assert(a bool) {
 }
 
 func (rf *Raft) apply(log Log) {
-	DPrintf(LOG3, rf.me, "APPLY LOG %v...", log)
-	rf.applyMsgChan <- ApplyMsg{
+	msg := ApplyMsg{
 		CommandValid: true,
 		Command:      log.Command,
 		CommandIndex: log.Index,
 	}
-	DPrintf(LOG3, rf.me, "APPLY LOG %v Done", log)
+	DPrintf(LOG3, rf.me, "APPLY LOG %v...", log)
+	rf.mu.Unlock()
+	defer rf.mu.Lock() 
+	// we don't need to lock for transmit for channel here
+	rf.applyMsgChan <- msg
 }
 
 func (rf *Raft) getLog(index int) *Log{
