@@ -86,6 +86,10 @@ type Raft struct {
 	applyMsgChan chan ApplyMsg
 	cond         *sync.Cond
 	lastSend     []time.Time
+
+
+	snapshot      []byte
+	// snapshotTerm & index are stored in the first log
 }
 
 // for debug
@@ -156,10 +160,25 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	assert(index <= rf.commitIndex)
+	rf.SetSnapshot(index, snapshot)
+}
+
+//can only be called within mutex
+func (rf *Raft) SetSnapshot(index int, snapshot []byte) bool {
+	if rf.log[0].Index > index { 
+		DPrintf(LOG3, rf.me, "STALE SNAPSHOT %v APPEND! DISCARD ", index )
+		return false
+	}
 	DPrintf(LOG3, rf.me, "SNAPSHOT %v ", index )
-	rf.log = rf.log[index - rf.X:]
-	rf.X = index 
+	rf.snapshot = snapshot
+	if len(rf.log) -1 >= index - rf.X {
+		rf.log = rf.log[index - rf.X:]
+		rf.X = index 
+	}else{
+		rf.log = []Log{{}}
+		rf.X = index
+	}
+	return true
 }
 
 // Invoked by leader to replicate log or send heartbeats
@@ -280,6 +299,43 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	}
 	return ok
 }
+
+
+type InstallSnapshotArgs struct{
+	Term int // leader's term
+	LeaderId int
+	LastIncludedIndex int 
+	LastIncludeTerm int
+	data []byte
+}
+
+type InstallSnapshotReply struct{
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) { 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm{
+		reply.Term = rf.currentTerm
+		return
+	}
+	if rf.SetSnapshot(args.LastIncludedIndex, args.data) &&
+	   (!(rf.log[0].Term == args.LastIncludeTerm && rf.log[0].Index == args.LastIncludedIndex)){
+		rf.log = []Log{{Term:  args.LastIncludeTerm, Index: args.LastIncludedIndex}}
+	} // else do nothing, already truncated in rf.SetSnapshot
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool {
+	reply := &InstallSnapshotReply{}
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	if ok && !rf.killed() {
+		//TODO: DO something
+	}
+	return ok
+}
+
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -569,11 +625,18 @@ func (rf *Raft) applyLogs() {
 			rf.cond.Wait()
 		}
 		DPrintf(LOG1, rf.me, "TRY TO APPLY LOGS (%v,%v,%v)", rf.commitIndex, rf.lastApplied, rf.log)
+		maxApply  := rf.commitIndex
+		toCommit := []*Log{}
+
 		// rf.commitIndex > rf.lastApplied
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			rf.apply(*rf.getLog(i))
+		for i := rf.lastApplied + 1; i <= maxApply; i++ {
+			toCommit = append(toCommit, rf.getLog(i))
 		}
-		rf.lastApplied = rf.commitIndex
+		for _,v := range(toCommit){
+			rf.apply(*v)
+		}
+
+		rf.lastApplied = maxApply
 		rf.mu.Unlock()
 	}
 }
