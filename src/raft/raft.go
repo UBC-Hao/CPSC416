@@ -117,6 +117,7 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
+	DPrintf(LOG3, rf.me, "Persist %v logs, %v Snapshot", len(rf.log),len(rf.snapshot))
 	// Your code here (2C).
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -125,7 +126,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.log)
 	e.Encode(rf.X)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(raftstate, rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -142,7 +143,8 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logs) != nil ||
-		d.Decode(&X) != nil{
+		d.Decode(&X) != nil {
+		
 		log.Print("FAIL")
 	} else {
 		rf.currentTerm = currentTerm
@@ -161,6 +163,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.SetSnapshot(index, snapshot)
+	rf.persist()
 }
 
 //can only be called within mutex
@@ -169,15 +172,17 @@ func (rf *Raft) SetSnapshot(index int, snapshot []byte) bool {
 		DPrintf(LOG3, rf.me, "STALE SNAPSHOT %v APPEND! DISCARD ", index )
 		return false
 	}
-	DPrintf(LOG3, rf.me, "SNAPSHOT %v ", index )
+	DPrintf(LOG3, rf.me, "SNAPSHOT %v, slen = %v , log len before = %v", index, len(rf.snapshot), len(rf.log) )
 	rf.snapshot = snapshot
 	if len(rf.log) -1 >= index - rf.X {
 		rf.log = rf.log[index - rf.X:]
 		rf.X = index 
+		//rf.log[0].Command = nil
 	}else{
 		rf.log = []Log{{}}
 		rf.X = index
 	}
+	DPrintf(LOG3, rf.me, "SNAPSHOT %v , slen=%v, log len after = %v", index, len(snapshot), len(rf.log) )
 	return true
 }
 
@@ -306,7 +311,7 @@ type InstallSnapshotArgs struct{
 	LeaderId int
 	LastIncludedIndex int 
 	LastIncludeTerm int
-	data []byte
+	Data []byte
 }
 
 type InstallSnapshotReply struct{
@@ -321,9 +326,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		reply.Term = rf.currentTerm
 		return
 	}
-	if rf.SetSnapshot(args.LastIncludedIndex, args.data) &&
+	if rf.SetSnapshot(args.LastIncludedIndex, args.Data) &&
 	   (!(rf.log[0].Term == args.LastIncludeTerm && rf.log[0].Index == args.LastIncludedIndex)){
 		rf.log = []Log{{Term:  args.LastIncludeTerm, Index: args.LastIncludedIndex}}
+		rf.persist()
 	} // else do nothing, already truncated in rf.SetSnapshot
 }
 
@@ -331,7 +337,21 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool 
 	reply := &InstallSnapshotReply{}
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	if ok && !rf.killed() {
-		//TODO: DO something
+		// we simply handle the reply here
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if reply.Term > rf.currentTerm {
+			// leader update itself
+			rf.currentTerm = args.Term
+			rf.ConvertTo(FOLLOWER) // Do not reset timer here for quickly vote
+			rf.votedFor = -1
+			return ok
+		}
+
+		// installSnapshot successful, now we update nextIndex and matchIndex
+		rf.matchIndex[server] = args.LastIncludedIndex
+		rf.nextIndex[server] = args.LastIncludedIndex + 1
 	}
 	return ok
 }
@@ -533,6 +553,20 @@ func (rf *Raft) SendAllVoteReq() {
 
 func (rf *Raft) buildSendAppendEntries(i int) {
 	rf.lastSend[i] = time.Now()
+
+	if rf.nextIndex[i] <= rf.X{
+		// Leader does not have the Log because of snapshot
+		send := &InstallSnapshotArgs{
+			Term: rf.currentTerm, 
+			LeaderId: rf.me,
+			LastIncludedIndex: rf.log[0].Index,
+			LastIncludeTerm: rf.log[0].Term,
+			Data: rf.snapshot,
+		}
+		go rf.sendInstallSnapshot(i, send)
+		return
+	}
+
 	entries := rf.getTail(rf.nextIndex[i]-1)
 	send := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -628,14 +662,24 @@ func (rf *Raft) applyLogs() {
 		maxApply  := rf.commitIndex
 		toCommit := []*Log{}
 
-		// rf.commitIndex > rf.lastApplied
+		if rf.lastApplied < rf.X{
+			// This means we need to first apply snapshot
+			msg := &ApplyMsg{
+				CommandValid: false,
+				SnapshotValid: true,
+				Snapshot: rf.snapshot,
+				SnapshotTerm: rf.log[0].Term,
+				SnapshotIndex: rf.log[0].Index,
+			}
+			rf.applySnapshot(msg)
+			rf.lastApplied = rf.log[0].Index
+		}
 		for i := rf.lastApplied + 1; i <= maxApply; i++ {
 			toCommit = append(toCommit, rf.getLog(i))
 		}
 		for _,v := range(toCommit){
 			rf.apply(*v)
 		}
-
 		rf.lastApplied = maxApply
 		rf.mu.Unlock()
 	}
@@ -805,6 +849,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.snapshot = persister.ReadSnapshot()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -872,14 +917,14 @@ func (rf *Raft) extend(B []Log) {
 	rf.log = append(rf.log, B...)
 }
 
-// given a Log array of raft rf, returns rf.log[index + 1:] as if log is complete
+// given a copied Log array of raft rf, returns rf.log[index + 1:] as if log is complete
 func (rf *Raft) getTail(index int) []Log {
 	if (index + 1) > rf.lastLogIndex() {
 		return []Log{}
 	} else {
 		//ret := make([]Log, len(A[index+1:]))
 		//copy(ret, A[index+1:])
-		return rf.log[index+1-rf.X:]
+		return cpLogs(rf.log[index+1-rf.X:])
 	}
 }
 
@@ -916,6 +961,16 @@ func assert(a bool) {
 	}
 }
 
+
+func (rf *Raft) applySnapshot(msg *ApplyMsg) {
+
+	DPrintf(LOG3, rf.me, "APPLY SNAPSHOT %v", msg.SnapshotIndex)
+	rf.mu.Unlock()
+	defer rf.mu.Lock() 
+	// we don't need to lock for transmit for channel here
+	rf.applyMsgChan <- *msg
+}
+
 func (rf *Raft) apply(log Log) {
 	msg := ApplyMsg{
 		CommandValid: true,
@@ -931,4 +986,16 @@ func (rf *Raft) apply(log Log) {
 
 func (rf *Raft) getLog(index int) *Log{
 	return &rf.log[index - rf.X]
+}
+
+func  cpBuf(input []byte) []byte{
+	ret := make([]byte, len(input))
+	copy(ret, input)
+	return ret
+}
+
+func  cpLogs(input []Log) []Log{
+	ret := make([]Log, len(input))
+	copy(ret, input)
+	return ret
 }

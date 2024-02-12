@@ -13,7 +13,7 @@ import (
 //
 //	Use the following to generate better logs, provided by TA
 //	 go test -run 2A | python3 parselog.py -c 3 -i Test,Test2
-const Debug = true
+const Debug = false
 
 var (
 	debugStart time.Time
