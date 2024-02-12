@@ -2,5 +2,5 @@
 
 for i in {1..100}
 do
-   go test -race >> output.txt
+   go test >> output2.txt
 done

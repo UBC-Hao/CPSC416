@@ -81,11 +81,14 @@ type Raft struct {
 
 	F int // total number of peers is 2*F+ 1
 	// voteChan is used to collect results
-	voteChan     chan *RequestVoteReply
+	voteChan     chan *RequestVoteReplyHelper
 	appendChan   chan *AppendEntriesReplyHelper
 	applyMsgChan chan ApplyMsg
 	cond         *sync.Cond
 	lastSend     []time.Time
+
+	rndTime time.Duration
+	voteRecv []bool // used for resend vote request in case of packet lost.
 
 	snapshot []byte
 	// snapshotTerm & index are stored in the first log
@@ -372,6 +375,12 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type RequestVoteReplyHelper struct {
+	// Your data here (2A).
+	reply RequestVoteReply
+	server int 
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)", args.Term, args.CandidateId)
@@ -442,7 +451,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if ok && !rf.killed() {
-		rf.voteChan <- reply
+		rf.voteChan <- &RequestVoteReplyHelper{
+			reply: *reply,
+			server: server,
+		}
 	}
 	return ok
 }
@@ -509,6 +521,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 	switch newstate {
 	case CANDIDATE:
 		rf.resetTimer() // in case this node becomes a FOLLOWER immediately
+		rf.voteRecv = make([]bool, rf.F*2 + 1)
 		rf.state = CANDIDATE
 		//start election
 		rf.currentTerm += 1
@@ -536,7 +549,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 // this is non-blocking, should only be called within mutex
 func (rf *Raft) SendAllVoteReq() {
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me {
+		if i != rf.me && !rf.voteRecv[i]{
 			send := &RequestVoteArgs{
 				Term:         rf.currentTerm,
 				CandidateId:  rf.me,
@@ -588,18 +601,29 @@ func (rf *Raft) BroadcastAppendEntries(force bool) {
 }
 
 func voteTimeout() time.Duration {
-	ms := 2*HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
+	ms := 100+HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
 	return time.Duration(ms) * time.Millisecond
 }
 
 // blocking function,
 func (rf *Raft) gatherVote() {
 	num := 1 // including my self
-	timeout := time.After(voteTimeout())
+	rndTime := voteTimeout()
+	timeout := time.After(rndTime)
+	timeout2 := time.After(rndTime / 2) // to send votes
 	for {
 		select {
-		case reply := <-rf.voteChan:
+		case replyHelper := <-rf.voteChan:
+			reply := replyHelper.reply
 			rf.mu.Lock()
+
+			if rf.voteRecv[replyHelper.server]{
+				rf.mu.Unlock()
+				return 
+			}
+
+			rf.voteRecv[replyHelper.server] = true
+
 			if reply.Term < rf.currentTerm {
 				//stale, do nothing
 				rf.mu.Unlock()
@@ -614,17 +638,21 @@ func (rf *Raft) gatherVote() {
 				rf.mu.Unlock()
 				return
 			}
-			rf.mu.Unlock()
-			if reply.VoteGranted {
+			
+			if reply.VoteGranted{ // in case of dup reply
 				num++
 				if num >= rf.F+1 {
 					//becomes the leader
-					rf.mu.Lock()
 					rf.ConvertTo(LEADER)
 					rf.mu.Unlock()
 					return
 				}
 			}
+			rf.mu.Unlock()
+		case <-timeout2:
+			rf.mu.Lock()
+			rf.SendAllVoteReq()
+			rf.mu.Unlock()
 		case <-timeout:
 			DPrintf(LOG3, rf.me, "Timeout on ASKING for votes")
 			return
@@ -768,6 +796,7 @@ func (rf *Raft) handleAppendReply() {
 // can only be called within mutex
 func (rf *Raft) resetTimer() {
 	rf.lastHB = time.Now()
+	rf.rndTime = voteTimeout()
 }
 
 func (rf *Raft) ticker() {
@@ -784,12 +813,12 @@ func (rf *Raft) ticker() {
 
 		case FOLLOWER:
 			rf.mu.Unlock()
-			rndTime := voteTimeout()
-			time.Sleep(rndTime)
+			time.Sleep(time.Duration(rand.Intn(10)+15) * time.Millisecond)
 			rf.mu.Lock()
 			//only proceed if it's still a follower
 
 			now := time.Now()
+			rndTime := rf.rndTime
 			if !rf.lastHB.Add(rndTime).Before(now) {
 				//did not time out on HB
 				rf.mu.Unlock()
@@ -832,13 +861,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	DPrintf(INIT, me, "Init")
 	rf.votedFor = -1
 	rf.state = FOLLOWER
-	rf.voteChan = make(chan *RequestVoteReply)
+	rf.voteChan = make(chan *RequestVoteReplyHelper)
 	rf.appendChan = make(chan *AppendEntriesReplyHelper)
 	rf.F = len(peers) / 2
 	rf.log = []Log{{}} // Starts from 1
 	rf.applyMsgChan = applyCh
 	rf.lastSend = make([]time.Time, len(rf.peers))
 	rf.cond = sync.NewCond(&rf.mu)
+	rf.voteRecv = make([]bool,len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.lastSend[i] = time.Now()
 	}
@@ -863,7 +893,7 @@ const (
 	FOLLOWER        role = 0
 	CANDIDATE       role = 1
 	LEADER          role = 2
-	HB_INTERVAL_RAW      = 130
+	HB_INTERVAL_RAW      = 150
 	HB_INTERVAL          = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )
@@ -938,7 +968,7 @@ func hasTerm(A []Log, term int) (bool, int) {
 		if A[i].Term == term {
 			has = true
 		} else if A[i].Term < term {
-			if has == true {
+			if has {
 				return true, i + 1
 			} else {
 				return false, -1
@@ -992,12 +1022,6 @@ func (rf *Raft) getLog(index int) *Log {
 		return nil
 	}
 	return &rf.log[index-rf.X]
-}
-
-func cpBuf(input []byte) []byte {
-	ret := make([]byte, len(input))
-	copy(ret, input)
-	return ret
 }
 
 func cpLogs(input []Log) []Log {
