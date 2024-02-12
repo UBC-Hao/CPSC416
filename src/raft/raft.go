@@ -87,7 +87,7 @@ type Raft struct {
 	cond         *sync.Cond
 	lastSend     []time.Time
 
-	rndTime time.Duration
+	rndTime  time.Duration
 	voteRecv []bool // used for resend vote request in case of packet lost.
 
 	snapshot []byte
@@ -344,9 +344,10 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool 
 
 		if reply.Term > rf.currentTerm {
 			// leader update itself
-			rf.currentTerm = args.Term
-			rf.ConvertTo(FOLLOWER) // Do not reset timer here for quickly vote
+			rf.currentTerm = reply.Term
+			rf.ConvertTo(FOLLOWER)
 			rf.votedFor = -1
+			rf.persist()
 			return ok
 		}
 
@@ -377,8 +378,8 @@ type RequestVoteReply struct {
 
 type RequestVoteReplyHelper struct {
 	// Your data here (2A).
-	reply RequestVoteReply
-	server int 
+	reply  RequestVoteReply
+	server int
 }
 
 // example RequestVote RPC handler.
@@ -396,7 +397,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
-			rf.ConvertTo(FOLLOWER) // Do not reset timer here for quickly vote
+			rf.ConvertTo(FOLLOWER) 
+			rf.resetTimer() // TODO: test if this line should be removed.
 			rf.votedFor = -1
 		}
 
@@ -404,7 +406,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
 			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v", args.CandidateId, rf.votedFor)
 			reply.VoteGranted = false
-		} else {
+		} else if (rf.votedFor == args.CandidateId){
+			reply.VoteGranted = true
+		}else {
 			myLastLog := rf.log[len(rf.log)-1]
 			if myLastLog.Term > args.LastLogTerm || (myLastLog.Term == args.LastLogTerm && myLastLog.Index > args.LastLogIndex) {
 				DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Not the latest LOG", args.CandidateId)
@@ -452,7 +456,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if ok && !rf.killed() {
 		rf.voteChan <- &RequestVoteReplyHelper{
-			reply: *reply,
+			reply:  *reply,
 			server: server,
 		}
 	}
@@ -521,7 +525,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 	switch newstate {
 	case CANDIDATE:
 		rf.resetTimer() // in case this node becomes a FOLLOWER immediately
-		rf.voteRecv = make([]bool, rf.F*2 + 1)
+		rf.voteRecv = make([]bool, rf.F*2+1)
 		rf.state = CANDIDATE
 		//start election
 		rf.currentTerm += 1
@@ -549,7 +553,7 @@ func (rf *Raft) ConvertTo(newstate role) {
 // this is non-blocking, should only be called within mutex
 func (rf *Raft) SendAllVoteReq() {
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me && !rf.voteRecv[i]{
+		if i != rf.me && !rf.voteRecv[i] {
 			send := &RequestVoteArgs{
 				Term:         rf.currentTerm,
 				CandidateId:  rf.me,
@@ -601,7 +605,7 @@ func (rf *Raft) BroadcastAppendEntries(force bool) {
 }
 
 func voteTimeout() time.Duration {
-	ms := 100+HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
+	ms := 100 + HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -610,19 +614,18 @@ func (rf *Raft) gatherVote(term int) {
 	num := 1 // including my self
 	rndTime := voteTimeout()
 	timeout := time.After(rndTime)
-	timeout2 := time.After(rndTime / 2) // to send votes
+	//timeout2 := time.After(rndTime / 2) // to send votes
 	for {
 		select {
 		case replyHelper := <-rf.voteChan:
 			reply := replyHelper.reply
 			rf.mu.Lock()
 
-			if !(rf.state == CANDIDATE && rf.currentTerm == term){
+			if !(rf.state == CANDIDATE && rf.currentTerm == term) {
 				// rf is no longer a candidate
 				rf.mu.Unlock()
 				return
 			}
-
 
 			if reply.Term < rf.currentTerm {
 				//stale, do nothing
@@ -639,12 +642,12 @@ func (rf *Raft) gatherVote(term int) {
 				return
 			}
 
-			if rf.voteRecv[replyHelper.server]{
+			if rf.voteRecv[replyHelper.server] {
 				rf.mu.Unlock()
-				continue 
+				continue
 			}
-			
-			if reply.VoteGranted{ // in case of dup reply
+
+			if reply.VoteGranted { // in case of dup reply
 				num++
 				if num >= rf.F+1 {
 					//becomes the leader
@@ -655,13 +658,13 @@ func (rf *Raft) gatherVote(term int) {
 			}
 			rf.voteRecv[replyHelper.server] = true
 			rf.mu.Unlock()
-		case <-timeout2://we have a second timeout in case of lost packets.
+		/*case <-timeout2: //we have a second timeout in case of lost packets.
 			rf.mu.Lock()
 			//rf may not be a candidate any more, we need to check first
-			if rf.state == CANDIDATE && rf.currentTerm == term{
+			if rf.state == CANDIDATE && rf.currentTerm == term {
 				rf.SendAllVoteReq()
 			}
-			rf.mu.Unlock()
+			rf.mu.Unlock()*/
 		case <-timeout:
 			DPrintf(LOG3, rf.me, "Timeout on ASKING for votes")
 			return
@@ -817,7 +820,7 @@ func (rf *Raft) ticker() {
 		case LEADER:
 			rf.BroadcastAppendEntries(false)
 			rf.mu.Unlock()
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			continue
 
 		case FOLLOWER:
@@ -841,7 +844,7 @@ func (rf *Raft) ticker() {
 		case CANDIDATE:
 			rf.ConvertTo(CANDIDATE) // +1 term
 			DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES, term = %v", rf.currentTerm)
-			term:= rf.currentTerm
+			term := rf.currentTerm
 			rf.SendAllVoteReq()
 			rf.mu.Unlock()
 			// Candidate, gather votes, will block for random time
@@ -878,7 +881,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyMsgChan = applyCh
 	rf.lastSend = make([]time.Time, len(rf.peers))
 	rf.cond = sync.NewCond(&rf.mu)
-	rf.voteRecv = make([]bool,len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.lastSend[i] = time.Now()
 	}
@@ -1000,7 +1002,7 @@ func (rf *Raft) checkValid() {
 }
 
 func assert(a bool) {
-	if  !a {
+	if !a {
 		DPrintf(FATAL, 0, "ASSERTION BUG")
 	}
 }
