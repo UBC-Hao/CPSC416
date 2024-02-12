@@ -240,6 +240,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// reply false if log doesn't contain an entry at
 		//    prevLogIndex whose term matches prevLogTerm
+		if (rf.getLog(args.PrevLogIndex)==nil){ 
+			//stale 
+			return 
+		}
 		if (rf.lastLogIndex() < args.PrevLogIndex) || (rf.getLog(args.PrevLogIndex).Term != args.PrevLogTerm) {
 			reply.Success = false
 			if rf.lastLogIndex() < args.PrevLogIndex {
@@ -985,6 +989,9 @@ func (rf *Raft) apply(log Log) {
 }
 
 func (rf *Raft) getLog(index int) *Log{
+	if index < rf.X {
+		return nil
+	}
 	return &rf.log[index - rf.X]
 }
 

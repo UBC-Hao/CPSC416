@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in {1..1}
+for i in {1..100}
 do
-   go test -run 2C >> output.txt
+   go test -race >> output.txt
 done
