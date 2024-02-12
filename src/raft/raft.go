@@ -606,7 +606,7 @@ func voteTimeout() time.Duration {
 }
 
 // blocking function,
-func (rf *Raft) gatherVote() {
+func (rf *Raft) gatherVote(term int) {
 	num := 1 // including my self
 	rndTime := voteTimeout()
 	timeout := time.After(rndTime)
@@ -617,12 +617,12 @@ func (rf *Raft) gatherVote() {
 			reply := replyHelper.reply
 			rf.mu.Lock()
 
-			if rf.voteRecv[replyHelper.server]{
+			if !(rf.state == CANDIDATE && rf.currentTerm == term){
+				// rf is no longer a candidate
 				rf.mu.Unlock()
-				return 
+				return
 			}
 
-			rf.voteRecv[replyHelper.server] = true
 
 			if reply.Term < rf.currentTerm {
 				//stale, do nothing
@@ -638,6 +638,11 @@ func (rf *Raft) gatherVote() {
 				rf.mu.Unlock()
 				return
 			}
+
+			if rf.voteRecv[replyHelper.server]{
+				rf.mu.Unlock()
+				continue 
+			}
 			
 			if reply.VoteGranted{ // in case of dup reply
 				num++
@@ -648,10 +653,14 @@ func (rf *Raft) gatherVote() {
 					return
 				}
 			}
+			rf.voteRecv[replyHelper.server] = true
 			rf.mu.Unlock()
-		case <-timeout2:
+		case <-timeout2://we have a second timeout in case of lost packets.
 			rf.mu.Lock()
-			rf.SendAllVoteReq()
+			//rf may not be a candidate any more, we need to check first
+			if rf.state == CANDIDATE && rf.currentTerm == term{
+				rf.SendAllVoteReq()
+			}
 			rf.mu.Unlock()
 		case <-timeout:
 			DPrintf(LOG3, rf.me, "Timeout on ASKING for votes")
@@ -832,10 +841,11 @@ func (rf *Raft) ticker() {
 		case CANDIDATE:
 			rf.ConvertTo(CANDIDATE) // +1 term
 			DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES, term = %v", rf.currentTerm)
+			term:= rf.currentTerm
 			rf.SendAllVoteReq()
 			rf.mu.Unlock()
 			// Candidate, gather votes, will block for random time
-			rf.gatherVote()
+			rf.gatherVote(term)
 		}
 
 	}
@@ -990,7 +1000,7 @@ func (rf *Raft) checkValid() {
 }
 
 func assert(a bool) {
-	if Debug && !a {
+	if  !a {
 		DPrintf(FATAL, 0, "ASSERTION BUG")
 	}
 }
