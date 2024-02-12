@@ -240,11 +240,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// reply false if log doesn't contain an entry at
 		//    prevLogIndex whose term matches prevLogTerm
-		if (rf.getLog(args.PrevLogIndex)==nil){ 
-			//stale 
-			return 
-		}
-		if (rf.lastLogIndex() < args.PrevLogIndex) || (rf.getLog(args.PrevLogIndex).Term != args.PrevLogTerm) {
+		if (rf.lastLogIndex() < args.PrevLogIndex) || (rf.getLog(args.PrevLogIndex) != nil  && rf.getLog(args.PrevLogIndex).Term != args.PrevLogTerm) {
 			reply.Success = false
 			if rf.lastLogIndex() < args.PrevLogIndex {
 				reply.XLen = len(rf.log) + rf.X
@@ -917,6 +913,14 @@ func (rf *Raft) extend(B []Log) {
 		}
 	}
 	start := B[0].Index
+	if start <= rf.X {
+		if len(B) > 1{
+			rf.extend(B[1:]) //TODO: Can be imprvoed, actually very rarely fells into this
+		}
+		return 
+	}
+
+
 	rf.log = rf.log[:start - rf.X]
 	rf.log = append(rf.log, B...)
 }
