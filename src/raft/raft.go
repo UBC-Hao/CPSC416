@@ -291,7 +291,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	reply := &AppendEntriesReply{}
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	ok := rf.Call(server,"Raft.AppendEntries", args, reply)
 	replyHelper := &AppendEntriesReplyHelper{
 		reply: reply,
 	}
@@ -336,7 +336,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool {
 	reply := &InstallSnapshotReply{}
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	ok := rf.Call(server,"Raft.InstallSnapshot", args, reply)
 	if ok && !rf.killed() {
 		// we simply handle the reply here
 		rf.mu.Lock()
@@ -453,7 +453,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	reply := &RequestVoteReply{}
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	ok := rf.Call(server,"Raft.RequestVote", args, reply)
 	if ok && !rf.killed() {
 		rf.voteChan <- &RequestVoteReplyHelper{
 			reply:  *reply,
@@ -947,6 +947,9 @@ func (rf *Raft) extend(B []Log) {
 	//check for conflicting
 	lastLogInB := B[len(B)-1]
 	if rf.lastLogIndex() >= lastLogInB.Index {
+		if rf.getLog(lastLogInB.Index) == nil { // This means our snapshot already has this log
+			return 
+		}
 		if rf.getLog(lastLogInB.Index).Term == lastLogInB.Term {
 			return
 		}
@@ -1040,4 +1043,11 @@ func cpLogs(input []Log) []Log {
 	ret := make([]Log, len(input))
 	copy(ret, input)
 	return ret
+}
+
+
+func (rf *Raft) Call(server int ,svcMeth string, args interface{}, reply interface{}) bool {
+	// Because RPC packets might be lost or timeout, we try to resend the request twice
+	ok := rf.peers[server].Call(svcMeth, args, reply)
+	return ok || rf.peers[server].Call(svcMeth, args, reply)
 }
