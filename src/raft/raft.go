@@ -222,6 +222,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	//if args.Term == rf.currentTerm && rf.state == LEADER {
+	//	DPrintf(FATAL, rf.me, "FAIL: DUPLICATE LEADER")
+	//	}
+
 	if args.Term < rf.currentTerm {
 		DPrintf(LOG2, rf.me, "STALE APPEND")
 		//stale
@@ -291,7 +296,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	reply := &AppendEntriesReply{}
-	ok := rf.Call(server,"Raft.AppendEntries", args, reply)
+	ok := rf.Call(server, "Raft.AppendEntries", args, reply)
 	replyHelper := &AppendEntriesReplyHelper{
 		reply: reply,
 	}
@@ -336,7 +341,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool {
 	reply := &InstallSnapshotReply{}
-	ok := rf.Call(server,"Raft.InstallSnapshot", args, reply)
+	ok := rf.Call(server, "Raft.InstallSnapshot", args, reply)
 	if ok && !rf.killed() {
 		// we simply handle the reply here
 		rf.mu.Lock()
@@ -397,7 +402,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
-			rf.ConvertTo(FOLLOWER) 
+			rf.ConvertTo(FOLLOWER)
 			rf.resetTimer() // TODO: test if this line should be removed.
 			rf.votedFor = -1
 		}
@@ -406,9 +411,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
 			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v", args.CandidateId, rf.votedFor)
 			reply.VoteGranted = false
-		} else if (rf.votedFor == args.CandidateId){
+		} else if rf.votedFor == args.CandidateId {
 			reply.VoteGranted = true
-		}else {
+		} else {
 			myLastLog := rf.log[len(rf.log)-1]
 			if myLastLog.Term > args.LastLogTerm || (myLastLog.Term == args.LastLogTerm && myLastLog.Index > args.LastLogIndex) {
 				DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Not the latest LOG", args.CandidateId)
@@ -453,7 +458,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	reply := &RequestVoteReply{}
-	ok := rf.Call(server,"Raft.RequestVote", args, reply)
+	ok := rf.Call(server, "Raft.RequestVote", args, reply)
 	if ok && !rf.killed() {
 		rf.voteChan <- &RequestVoteReplyHelper{
 			reply:  *reply,
@@ -659,12 +664,12 @@ func (rf *Raft) gatherVote(term int) {
 			rf.voteRecv[replyHelper.server] = true
 			rf.mu.Unlock()
 		/*case <-timeout2: //we have a second timeout in case of lost packets.
-			rf.mu.Lock()
-			//rf may not be a candidate any more, we need to check first
-			if rf.state == CANDIDATE && rf.currentTerm == term {
-				rf.SendAllVoteReq()
-			}
-			rf.mu.Unlock()*/
+		rf.mu.Lock()
+		//rf may not be a candidate any more, we need to check first
+		if rf.state == CANDIDATE && rf.currentTerm == term {
+			rf.SendAllVoteReq()
+		}
+		rf.mu.Unlock()*/
 		case <-timeout:
 			DPrintf(LOG3, rf.me, "Timeout on ASKING for votes")
 			return
@@ -767,35 +772,33 @@ func (rf *Raft) handleAppendReply() {
 				if !success {
 					// match index is not found, we need to quickly resend and check again
 					// rf.nextIndex[server] = replyHelper.prevLogIndex
-					// replies might not be in the seq time order, we need to check first
-					if rf.matchIndex[server] <= replyHelper.prevLogIndex {
-						//rf.nextIndex[server] -= 1
-						//Implement quick backup
-						if reply.XTerm != -1 {
-							ok, idx := hasTerm(rf.log, reply.XTerm)
-							if !ok {
-								rf.nextIndex[server] = reply.XIndex
-							} else {
-								// it might be possible like   [ 2 3 3 3 3 ]
-								// while leader is             [ 3 3 3 3 3 ]
-								//rf.nextIndex[server] = rf.nextIndex[server] - 1
-								//if rf.nextIndex[server]  > idx{
-								DPrintf(LOG4, rf.me, "%v %v", idx, rf.log)
-								rf.nextIndex[server] = idx
-								//}
-							}
+					// replies might not be in the seq time order
+					if reply.XTerm != -1 {
+						ok, idx := hasTerm(rf.log, reply.XTerm)
+						if !ok {
+							rf.nextIndex[server] = reply.XIndex
 						} else {
-							//follower's log is too short
-							rf.nextIndex[server] = reply.XLen
+							// it might be possible like   [ 2 3 3 3 3 ]
+							// while leader is             [ 3 3 3 3 3 ]
+							DPrintf(LOG4, rf.me, "%v %v", idx, rf.log)
+							rf.nextIndex[server] = idx
 						}
+					} else {
+						//follower's log is too short
+						rf.nextIndex[server] = reply.XLen
 					}
 					rf.buildSendAppendEntries(server) // quickly resend
-				} else if rf.matchIndex[server] <= replyHelper.prevLogIndex { //in case of stale request
-					rf.matchIndex[server] = replyHelper.prevLogIndex
+				} else {
+					// we do not want stale requests to move the matchIndex backward.
+					if replyHelper.prevLogIndex > rf.matchIndex[server] {
+						rf.matchIndex[server] = replyHelper.prevLogIndex
+					}
 					if replyHelper.entriesMaxIndex != 0 {
-						// this means some entries are sent to the server and is successfully updated
+						// this means some entries are sent to the server and are successfully updated
 						rf.nextIndex[server] = replyHelper.entriesMaxIndex + 1
-						rf.matchIndex[server] = replyHelper.entriesMaxIndex
+						if replyHelper.entriesMaxIndex > rf.matchIndex[server] {
+							rf.matchIndex[server] = replyHelper.entriesMaxIndex
+						}
 					}
 					rf.tryLeaderCommit(rf.matchIndex[server])
 				}
@@ -948,7 +951,7 @@ func (rf *Raft) extend(B []Log) {
 	lastLogInB := B[len(B)-1]
 	if rf.lastLogIndex() >= lastLogInB.Index {
 		if rf.getLog(lastLogInB.Index) == nil { // This means our snapshot already has this log
-			return 
+			return
 		}
 		if rf.getLog(lastLogInB.Index).Term == lastLogInB.Term {
 			return
@@ -1045,9 +1048,16 @@ func cpLogs(input []Log) []Log {
 	return ret
 }
 
-
-func (rf *Raft) Call(server int ,svcMeth string, args interface{}, reply interface{}) bool {
-	// Because RPC packets might be lost or timeout, we try to resend the request twice
-	ok := rf.peers[server].Call(svcMeth, args, reply)
-	return ok || rf.peers[server].Call(svcMeth, args, reply)
+func (rf *Raft) Call(server int, svcMeth string, args interface{}, reply interface{}) bool {
+	// Because RPC packets might be lost or timeout
+	//, we try to resend the request multiple times, until HB interval
+	start := time.Now()
+	for time.Since(start) < HB_INTERVAL {
+		ok := rf.peers[server].Call(svcMeth, args, reply)
+		if ok {
+			return ok
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
