@@ -8,14 +8,12 @@ package raft
 // test with the original before submitting.
 //
 
-import (
-	"fmt"
-	"math/rand"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-)
+import "testing"
+import "fmt"
+import "time"
+import "math/rand"
+import "sync/atomic"
+import "sync"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -498,7 +496,7 @@ func TestBackup2B(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
-	
+
 	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
@@ -511,7 +509,6 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
-	
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -522,14 +519,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-	t1:= time.Now()
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
-	t2:=time.Now()
-	fmt.Printf("Preparation0 Elapsed %v\n", t2.Sub(t1).Seconds())
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
 	other := (leader1 + 2) % servers
@@ -544,8 +539,6 @@ func TestBackup2B(t *testing.T) {
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
-	t2 = time.Now()
-	fmt.Printf("Preparation Elapsed %v\n", t2.Sub(t1).Seconds())
 
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
@@ -554,24 +547,17 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
-	cfg.one(rand.Int(), 3, true)
-	t6 := time.Now()
-	fmt.Printf("One : %v\n", t6.Sub(t2).Seconds())
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-	t3 := time.Now()
-	fmt.Printf("Preparation2 Elapsed %v\n", t3.Sub(t2).Seconds())
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
-	t4 := time.Now()
-	fmt.Printf("Preparation2 Elapsed %v\n", t4.Sub(t3).Seconds())
 
 	cfg.end()
 }
@@ -827,15 +813,6 @@ func TestFigure82C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
-
-		for i := 0; i < servers; i++ {
-			if cfg.rafts[i] != nil {
-				DPrintf(LOG3, i, "stat: %v", cfg.rafts[i])
-				
-			}
-		}
-
-
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
@@ -873,12 +850,6 @@ func TestFigure82C(t *testing.T) {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
-		}
-	}
-	DPrintfline()
-	for i := 0; i < servers; i++ {
-		if cfg.rafts[i] != nil {
-			DPrintf(LOG4, i, "my stats %v", cfg.rafts[i])
 		}
 	}
 
@@ -927,11 +898,9 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
-		if iters == 0 {// should be 200
-			//fmt.Println("Ordering changed.")
+		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
-		//fmt.Println("-------------------------------------------------")
 		leader := -1
 		for i := 0; i < servers; i++ {
 			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
@@ -1158,9 +1127,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 		// perhaps send enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
-		DPrintf(LOG1, sender, "%v requests", nn )
 		for i := 0; i < nn; i++ {
-			DPrintf(LOG1, sender, "-- %v-th request", i)
 			cfg.rafts[sender].Start(rand.Int())
 		}
 
@@ -1175,7 +1142,6 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if cfg.LogSize() >= MAXLOGSIZE {
-			//fmt.Println(cfg.LogSize())
 			cfg.t.Fatalf("Log size too large")
 		}
 		if disconnect {
