@@ -36,11 +36,16 @@ const (
 	LOG4  ptopic = "LOG4"
 	LOG5  ptopic = "LOG5"
 	APPE  ptopic = "APPE"
+	FATAL ptopic = "FATAL"
+	SUPE ptopic = "LOG4" // ignore debug
 )
 
 func DPrintf(topic ptopic, me int, format string, a ...interface{}) (n int, err error) {
+	if topic == FATAL {
+		log.Fatal(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format)
+	}
 	if Debug {
-		log.Printf(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format, a...)
+		log.Printf(fmt.Sprintf("%06d %v S%d [%v]", time.Since(debugStart).Microseconds(), topic, me,time.Since(debugStart).Seconds())+format, a...)
 	}
 	return
 }
