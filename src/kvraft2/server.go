@@ -1,28 +1,22 @@
-package kvraft
+package kvraft2
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
-	"log"
+	"cpsc416/labgob"
+	"cpsc416/labrpc"
+	"cpsc416/raft"
 	"sync"
 	"sync/atomic"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	SerialNum int64
+	Action   string
+	Key string
+	Value string
 }
 
 type KVServer struct {
@@ -35,15 +29,84 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	replyChans map[int]chan *Op
+	applied map[int64]bool
+
+	data map[string]string
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	command := Op{
+		Action:  GetAction,
+		Key: args.Key,
+	}
+	kv.mu.Lock()
+	index , _ , isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	retChan := make(chan *Op, 1)
+	kv.replyChans[index] = retChan
+	kv.mu.Unlock()
+
+	command2 := <- retChan
+	if command2.Action == GetAction && command2.Key == command.Key {
+		reply.Err = OK
+		reply.Value = command2.Value
+	}else{
+		reply.Err = CommitFailed
+	}
+
+	kv.mu.Lock()
+	close(kv.replyChans[index])
+	delete(kv.replyChans, index)
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	if _,ok:=kv.applied[args.SerialNum]; ok{
+		kv.mu.Unlock()
+		// already applied 
+		reply.Err = OK
+		return
+	}
+
+	command := Op{
+		SerialNum: args.SerialNum,
+		Action: args.Op,
+		Key: args.Key,
+		Value: args.Value,
+	}
+	kv.mu.Lock()
+	index , _ , isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	retChan := make(chan *Op, 1)
+	kv.replyChans[index] = retChan
+	kv.mu.Unlock()
+
+	command2 := <- retChan
+	if *command2 == command {
+		reply.Err = OK
+	}else{
+		reply.Err = CommitFailed
+	}
+
+	kv.mu.Lock()
+	close(kv.replyChans[index])
+	delete(kv.replyChans, index)
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) GetState(args struct{}, reply *StateReply) {
+	term,isLeaeder := kv.rf.GetState()
+	reply.Term = term
+	reply.IsLeader = isLeaeder
 }
 
 //
@@ -65,6 +128,53 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) handleApplyMsg() {
+	for applyMsg := range(kv.applyCh) {
+
+		if applyMsg.SnapshotValid{
+			continue
+		}
+
+		cmd, valid := applyMsg.Command.(Op)
+		if !valid { cmd = Op{}}
+
+
+		//process, don't run the same request twice.
+		if cmd.Action==PutAction || cmd.Action == AppendAction {
+		kv.mu.Lock()
+		if _,ok := kv.applied[cmd.SerialNum]; ok{ 
+			DPrintf(LOG2, kv.me, "Double Put or Append in ApplyChan")
+			// tell the client this is OK
+			opChan, ok:= kv.replyChans[applyMsg.CommandIndex]
+			if ok { opChan <- &cmd }
+			//already applied
+			kv.mu.Unlock()
+			continue
+		}
+		}
+
+		val, ok2 := kv.data[cmd.Key]
+		if !ok2 { val = "" }
+		if cmd.Action == PutAction{
+			kv.data[cmd.Key] = cmd.Value
+		}else if (ok2 && cmd.Action == AppendAction){
+			//AppendAction
+			kv.data[cmd.Key] = val + cmd.Value
+		}else if (cmd.Action == GetAction){
+			cmd.Value = val
+		}else{
+			DPrintf(LOG3, kv.me,"Unkown cmd action")
+		}
+		
+		kv.applied[cmd.SerialNum] = true
+
+		// tell the client this is OK
+		opChan, ok:= kv.replyChans[applyMsg.CommandIndex]
+		if ok { opChan <- &cmd }
+		kv.mu.Unlock()
+	}
 }
 
 //
@@ -96,6 +206,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-
+	go kv.handleApplyMsg()
 	return kv
 }

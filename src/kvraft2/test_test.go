@@ -1,7 +1,7 @@
-package kvraft
+package kvraft2
 
-import "6.824/porcupine"
-import "6.824/models"
+import "cpsc416/porcupine"
+import "cpsc416/models"
 import "testing"
 import "strconv"
 import "time"
