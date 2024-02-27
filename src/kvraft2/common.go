@@ -27,6 +27,7 @@ type PutAppendArgs struct {
 	Value string
 	Op    string // "Put" or "Append"
 	SerialNum int64
+	//RpcNum int
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.

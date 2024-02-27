@@ -4,19 +4,24 @@ import (
 	"cpsc416/labgob"
 	"cpsc416/labrpc"
 	"cpsc416/raft"
+	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
-
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	SerialNum int64
-	Action   string
-	Key string
-	Value string
+	Action    string
+	Key       string
+	Value     string
+}
+
+func (op Op) String() string {
+	return fmt.Sprintf("(cmd: Ac: %v, Key: %v)", op.Action, op.Key)
 }
 
 type KVServer struct {
@@ -30,86 +35,101 @@ type KVServer struct {
 
 	// Your definitions here.
 	replyChans map[int]chan *Op
-	applied map[int64]bool
+	applied    map[int64]bool
 
 	data map[string]string
+	die  chan struct{}
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	DPrintf(LOG2, kv.me, "Got Get Request")
 	command := Op{
-		Action:  GetAction,
-		Key: args.Key,
+		Action: GetAction,
+		Key:    args.Key,
 	}
 	kv.mu.Lock()
-	index , _ , isLeader := kv.rf.Start(command)
+	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	retChan := make(chan *Op, 1)
 	kv.replyChans[index] = retChan
 	kv.mu.Unlock()
+	select {
+	case command2 := <-retChan:
+		if command2.Action == GetAction && command2.Key == command.Key {
+			reply.Err = OK
+			reply.Value = command2.Value
+			DPrintf(LOG2, kv.me, "Committed")
+		} else {
+			reply.Err = CommitFailed
+			kv.flushChans(index)
+			DPrintf(LOG2, kv.me, "fail to reach agreement")
+		}
 
-	command2 := <- retChan
-	if command2.Action == GetAction && command2.Key == command.Key {
-		reply.Err = OK
-		reply.Value = command2.Value
-	}else{
-		reply.Err = CommitFailed
+		kv.mu.Lock()
+		delete(kv.replyChans, index)
+		kv.mu.Unlock()
+	case <-kv.die:
+		return
 	}
-
-	kv.mu.Lock()
-	close(kv.replyChans[index])
-	delete(kv.replyChans, index)
-	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	DPrintf(LOG2, kv.me, "Got PutAppend Request")
 	kv.mu.Lock()
-	if _,ok:=kv.applied[args.SerialNum]; ok{
+	if _, ok := kv.applied[args.SerialNum]; ok {
+		DPrintf(LOG2, kv.me, "Stale PutAppend Request")
 		kv.mu.Unlock()
-		// already applied 
+		// already applied
 		reply.Err = OK
 		return
 	}
 
 	command := Op{
 		SerialNum: args.SerialNum,
-		Action: args.Op,
-		Key: args.Key,
-		Value: args.Value,
+		Action:    args.Op,
+		Key:       args.Key,
+		Value:     args.Value,
 	}
-	kv.mu.Lock()
-	index , _ , isLeader := kv.rf.Start(command)
+	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	retChan := make(chan *Op, 1)
 	kv.replyChans[index] = retChan
 	kv.mu.Unlock()
+	DPrintf(LOG2, kv.me, "Waiting for commitment")
 
-	command2 := <- retChan
-	if *command2 == command {
-		reply.Err = OK
-	}else{
-		reply.Err = CommitFailed
+	select {
+	case command2 := <-retChan:
+		if *command2 == command {
+			reply.Err = OK
+			DPrintf(LOG2, kv.me, "Committed")
+		} else {
+			reply.Err = CommitFailed
+			kv.flushChans(index)
+			DPrintf(LOG2, kv.me, "fail to reach agreement")
+		}
+
+		kv.mu.Lock()
+		delete(kv.replyChans, index)
+		kv.mu.Unlock()
+	case <-kv.die:
 	}
 
-	kv.mu.Lock()
-	close(kv.replyChans[index])
-	delete(kv.replyChans, index)
-	kv.mu.Unlock()
 }
 
-func (kv *KVServer) GetState(args struct{}, reply *StateReply) {
-	term,isLeaeder := kv.rf.GetState()
+func (kv *KVServer) GetState(args *struct{}, reply *StateReply) {
+	term, isLeaeder := kv.rf.GetState()
 	reply.Term = term
 	reply.IsLeader = isLeaeder
 }
 
-//
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -118,11 +138,11 @@ func (kv *KVServer) GetState(args struct{}, reply *StateReply) {
 // code to Kill(). you're not required to do anything
 // about this, but it may be convenient (for example)
 // to suppress debug output from a Kill()ed instance.
-//
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	close(kv.die)
 }
 
 func (kv *KVServer) killed() bool {
@@ -131,53 +151,86 @@ func (kv *KVServer) killed() bool {
 }
 
 func (kv *KVServer) handleApplyMsg() {
-	for applyMsg := range(kv.applyCh) {
+	for applyMsg := range kv.applyCh {
 
-		if applyMsg.SnapshotValid{
+		if applyMsg.SnapshotValid {
 			continue
 		}
 
 		cmd, valid := applyMsg.Command.(Op)
-		if !valid { cmd = Op{}}
-
-
-		//process, don't run the same request twice.
-		if cmd.Action==PutAction || cmd.Action == AppendAction {
-		kv.mu.Lock()
-		if _,ok := kv.applied[cmd.SerialNum]; ok{ 
-			DPrintf(LOG2, kv.me, "Double Put or Append in ApplyChan")
-			// tell the client this is OK
-			opChan, ok:= kv.replyChans[applyMsg.CommandIndex]
-			if ok { opChan <- &cmd }
-			//already applied
-			kv.mu.Unlock()
-			continue
+		if !valid {
+			cmd = Op{}
 		}
+
+		kv.mu.Lock()
+		//process, don't run the same request twice.
+		if cmd.Action == PutAction || cmd.Action == AppendAction {
+			if _, ok := kv.applied[cmd.SerialNum]; ok {
+				DPrintf(LOG2, kv.me, "Double Put or Append in ApplyChan")
+				// tell the client this is OK
+				opChan, ok := kv.replyChans[applyMsg.CommandIndex]
+				if ok {
+					opChan <- &cmd
+				}
+				//already applied
+				kv.mu.Unlock()
+				continue
+			}
 		}
 
 		val, ok2 := kv.data[cmd.Key]
-		if !ok2 { val = "" }
-		if cmd.Action == PutAction{
+		if !ok2 {
+			val = ""
+		}
+		if cmd.Action == PutAction {
 			kv.data[cmd.Key] = cmd.Value
-		}else if (ok2 && cmd.Action == AppendAction){
+		} else if cmd.Action == AppendAction {
 			//AppendAction
 			kv.data[cmd.Key] = val + cmd.Value
-		}else if (cmd.Action == GetAction){
+		} else if cmd.Action == GetAction {
 			cmd.Value = val
-		}else{
-			DPrintf(LOG3, kv.me,"Unkown cmd action")
 		}
-		
+
 		kv.applied[cmd.SerialNum] = true
 
 		// tell the client this is OK
-		opChan, ok:= kv.replyChans[applyMsg.CommandIndex]
-		if ok { opChan <- &cmd }
+		opChan, ok := kv.replyChans[applyMsg.CommandIndex]
+		if ok {
+			opChan <- &cmd
+		}
 		kv.mu.Unlock()
 	}
 }
 
-//
+// called out side of  mutex, used when first step down as a follower
+func (kv *KVServer) flushChans(except int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	for k, v := range kv.replyChans {
+		if k == except {
+			continue
+		}
+		v <- &Op{}
+		delete(kv.replyChans, k)
+	}
+}
+
+func (kv *KVServer) leaderShipCheck() {
+	for {
+		time.Sleep(30 * time.Millisecond)
+		kv.mu.Lock()
+		isok := len(kv.replyChans) != 0 
+		kv.mu.Unlock()
+		if isok {
+			_, IsLeader := kv.rf.GetState()
+			if !IsLeader {
+				kv.flushChans(-1)
+			}
+		}
+	}
+}
+
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -190,7 +243,6 @@ func (kv *KVServer) handleApplyMsg() {
 // you don't need to snapshot.
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
@@ -199,6 +251,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.replyChans = make(map[int]chan *Op, 1000)
+	kv.applied = make(map[int64]bool, 1000)
+	kv.data = make(map[string]string, 1000)
+	kv.die = make(chan struct{})
 
 	// You may need initialization code here.
 
@@ -207,5 +263,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	go kv.handleApplyMsg()
+	go kv.leaderShipCheck()
 	return kv
 }

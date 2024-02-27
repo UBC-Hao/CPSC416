@@ -14,6 +14,8 @@ type Clerk struct {
 
 	LeaderId int // LeaderId could be a stale leader.
 	Term int 
+	SerialNum int64
+	RpcNum int 
 	// You will have to modify this struct.
 }
 
@@ -27,6 +29,8 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.SerialNum = nrand()
+	ck.RpcNum = 1
 	// You'll have to add code here.
 	return ck
 }
@@ -79,8 +83,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Key: key,
 		Value: value,
 		Op: op,
-		SerialNum: nrand(), // TODO: Make sure this is actually unique
+		SerialNum: nrand(),
+		//RpcNum: ck.RpcNum,
 	}
+	ck.RpcNum += 1
 
 	for {
 		reply := PutAppendReply{}
