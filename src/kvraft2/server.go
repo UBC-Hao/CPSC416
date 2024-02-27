@@ -1,6 +1,7 @@
 package kvraft2
 
 import (
+	"bytes"
 	"cpsc416/labgob"
 	"cpsc416/labrpc"
 	"cpsc416/raft"
@@ -14,7 +15,8 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	SerialNum int64
+	UID int64
+	RpcNum int
 	Action    string
 	Key       string
 	Value     string
@@ -35,10 +37,11 @@ type KVServer struct {
 
 	// Your definitions here.
 	replyChans map[int]chan *Op
-	applied    map[int64]bool
+	applied    map[int64]int
 
 	data map[string]string
 	die  chan struct{}
+	persister *raft.Persister
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -71,6 +74,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		kv.mu.Lock()
 		delete(kv.replyChans, index)
+		close(retChan)
 		kv.mu.Unlock()
 	case <-kv.die:
 		return
@@ -80,7 +84,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf(LOG2, kv.me, "Got PutAppend Request")
 	kv.mu.Lock()
-	if _, ok := kv.applied[args.SerialNum]; ok {
+	if  ok := kv.checkApplied(args.UID, args.RpcNum); ok {
 		DPrintf(LOG2, kv.me, "Stale PutAppend Request")
 		kv.mu.Unlock()
 		// already applied
@@ -89,7 +93,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	command := Op{
-		SerialNum: args.SerialNum,
+		UID: args.UID,
+		RpcNum: args.RpcNum,
 		Action:    args.Op,
 		Key:       args.Key,
 		Value:     args.Value,
@@ -118,6 +123,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 		kv.mu.Lock()
 		delete(kv.replyChans, index)
+		close(retChan)
 		kv.mu.Unlock()
 	case <-kv.die:
 	}
@@ -154,6 +160,8 @@ func (kv *KVServer) handleApplyMsg() {
 	for applyMsg := range kv.applyCh {
 
 		if applyMsg.SnapshotValid {
+			//This is a snapshot
+			kv.readFromSnapshot(applyMsg.Snapshot)
 			continue
 		}
 
@@ -165,13 +173,11 @@ func (kv *KVServer) handleApplyMsg() {
 		kv.mu.Lock()
 		//process, don't run the same request twice.
 		if cmd.Action == PutAction || cmd.Action == AppendAction {
-			if _, ok := kv.applied[cmd.SerialNum]; ok {
+			if ok :=kv.checkApplied(cmd.UID, cmd.RpcNum); ok {
 				DPrintf(LOG2, kv.me, "Double Put or Append in ApplyChan")
-				// tell the client this is OK
-				opChan, ok := kv.replyChans[applyMsg.CommandIndex]
-				if ok {
-					opChan <- &cmd
-				}
+				// tell the client the result, may not be ok
+				opChan, ok := kv.replyChans[applyMsg.CommandIndex] //rare
+				if ok {opChan <- &cmd}
 				//already applied
 				kv.mu.Unlock()
 				continue
@@ -191,7 +197,10 @@ func (kv *KVServer) handleApplyMsg() {
 			cmd.Value = val
 		}
 
-		kv.applied[cmd.SerialNum] = true
+		kv.setApplied(cmd.UID, cmd.RpcNum)
+		if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate * 9 / 10{
+			kv.dumpCurrentState(applyMsg.CommandIndex)
+		}
 
 		// tell the client this is OK
 		opChan, ok := kv.replyChans[applyMsg.CommandIndex]
@@ -231,6 +240,58 @@ func (kv *KVServer) leaderShipCheck() {
 	}
 }
 
+//called within mutex
+func (kv *KVServer) checkApplied(UID int64, rpcnum int) bool{
+	val,ok := kv.applied[UID]
+	if !ok {val = 0}
+	if val < rpcnum {
+		return false
+	}else{
+		return true
+	}
+}
+
+//called within mutex
+func (kv *KVServer) setApplied(UID int64, rpcnum int) {
+	val,ok := kv.applied[UID]
+	if !ok {val = 0}
+	if val < rpcnum { 
+		kv.applied[UID] = rpcnum
+	}
+}
+
+//called within mutex
+func (kv *KVServer) dumpCurrentState(index int){
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.applied)
+	e.Encode(kv.data)
+	snapshot := w.Bytes()
+	kv.rf.Snapshot(index, snapshot)
+}
+
+
+//called outside of a mutex
+func (kv *KVServer) readFromSnapshot(data []byte){
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var applied map[int64]int
+	var data_kv map[string]string
+	if d.Decode(&applied) != nil ||
+		d.Decode(&data_kv) != nil{
+		//log.Print("FAIL")
+	} else {
+		kv.applied = applied
+		kv.data = data_kv
+	}
+}
+
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -252,9 +313,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.replyChans = make(map[int]chan *Op, 1000)
-	kv.applied = make(map[int64]bool, 1000)
+	kv.applied = make(map[int64]int, 1000)
 	kv.data = make(map[string]string, 1000)
 	kv.die = make(chan struct{})
+	kv.persister = persister
 
 	// You may need initialization code here.
 
