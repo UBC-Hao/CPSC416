@@ -92,6 +92,9 @@ type Raft struct {
 
 	snapshot []byte
 	// snapshotTerm & index are stored in the first log
+
+	lastSendIDX int
+	sendCond *sync.Cond
 }
 
 // for debug
@@ -501,6 +504,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, newlog)
 		DPrintf(LOG3, rf.me, "START COMMIT %v, x= %v, cmd=%v", index, rf.X, command)
 		rf.persist()
+		rf.sendCond.Signal()
 	}
 	return index, term, isLeader
 }
@@ -857,6 +861,17 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) leaderLogQuickSend(){
+	for {
+		rf.mu.Lock()
+		for rf.lastSendIDX < rf.lastLogIndex(){
+			rf.sendCond.Wait()
+		}
+		rf.BroadcastAppendEntries(true)
+		rf.mu.Unlock()
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -884,6 +899,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyMsgChan = applyCh
 	rf.lastSend = make([]time.Time, len(rf.peers))
 	rf.cond = sync.NewCond(&rf.mu)
+	rf.sendCond = sync.NewCond(&rf.mu) // for quickly send log when start
 	for i := 0; i < len(rf.peers); i++ {
 		rf.lastSend[i] = time.Now()
 	}
@@ -897,6 +913,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 	go rf.handleAppendReply()
 	go rf.applyLogs()
+	go rf.leaderLogQuickSend()
 
 	return rf
 }
@@ -908,7 +925,7 @@ const (
 	FOLLOWER        role = 0
 	CANDIDATE       role = 1
 	LEADER          role = 2
-	HB_INTERVAL_RAW      = 150
+	HB_INTERVAL_RAW      = 110
 	HB_INTERVAL          = HB_INTERVAL_RAW * time.Millisecond
 	//HB_TIMEOUT       = 2 * HB_INTERVAL
 )

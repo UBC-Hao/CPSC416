@@ -53,7 +53,7 @@ type StateReply struct{
 	IsLeader bool
 }
 
-const Debug = false
+const Debug = true
 
 var (
 	debugStart time.Time
