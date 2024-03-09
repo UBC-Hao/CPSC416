@@ -864,10 +864,13 @@ func (rf *Raft) ticker() {
 func (rf *Raft) leaderLogQuickSend(){
 	for {
 		rf.mu.Lock()
-		for rf.lastSendIDX < rf.lastLogIndex(){
+
+		for (rf.lastSendIDX >= rf.lastLogIndex()) || (rf.state != LEADER){
 			rf.sendCond.Wait()
 		}
+		idx := rf.lastLogIndex()
 		rf.BroadcastAppendEntries(true)
+		rf.lastSendIDX = idx
 		rf.mu.Unlock()
 	}
 }
