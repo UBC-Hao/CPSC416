@@ -96,11 +96,13 @@ func TestBasic(t *testing.T) {
 	ck.Join(map[int][]string{gid1: []string{"x", "y", "z"}})
 	check(t, []int{gid1}, ck)
 	cfa[1] = ck.Query(-1)
+	//fmt.Print("===========\n")
 
 	var gid2 int = 2
 	ck.Join(map[int][]string{gid2: []string{"a", "b", "c"}})
 	check(t, []int{gid1, gid2}, ck)
 	cfa[2] = ck.Query(-1)
+	//fmt.Print("===========\n")
 
 	cfx := ck.Query(-1)
 	sa1 := cfx.Groups[gid1]
