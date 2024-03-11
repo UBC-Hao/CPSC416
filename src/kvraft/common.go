@@ -14,23 +14,20 @@ const (
 )
 
 const (
-	PutAction = "Put"
+	PutAction    = "Put"
 	AppendAction = "Append"
-	GetAction = "Get"
+	GetAction    = "Get"
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	UID int64 // uid for the client
+	Key    string
+	Value  string
+	Op     string // "Put" or "Append"
+	UID    int64  // uid for the client
 	RpcNum int
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
 type PutAppendReply struct {
@@ -40,6 +37,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	UID    int64 // uid for the client
+	RpcNum int
 }
 
 type GetReply struct {
@@ -47,12 +46,10 @@ type GetReply struct {
 	Value string
 }
 
-
-type StateReply struct{
-	Term int 
+type StateReply struct {
+	Term     int
 	IsLeader bool
 }
-
 
 var (
 	debugStart time.Time
@@ -76,15 +73,15 @@ const (
 	LOG5  ptopic = "LOG5"
 	APPE  ptopic = "APPE"
 	FATAL ptopic = "FATAL"
-	SUPE ptopic = "LOG4" // ignore debug
+	SUPE  ptopic = "LOG4" // ignore debug
 )
 
 func DPrintf(topic ptopic, me int, format string, a ...interface{}) (n int, err error) {
 	if topic == FATAL {
-		log.Fatal(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me)+format)
+		log.Fatal(fmt.Sprintf("%06d %v S%d ", time.Since(debugStart).Microseconds(), topic, me) + format)
 	}
 	if Debug {
-		log.Printf(fmt.Sprintf("%06d %v S%d [%v]", time.Since(debugStart).Microseconds(), topic, me,time.Since(debugStart).Seconds())+format, a...)
+		log.Printf(fmt.Sprintf("%06d %v S%d [%v]", time.Since(debugStart).Microseconds(), topic, me, time.Since(debugStart).Seconds())+format, a...)
 	}
 	return
 }

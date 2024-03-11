@@ -8,10 +8,10 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.824/labrpc"
+import "cpsc416/labrpc"
 import "crypto/rand"
 import "math/big"
-import "6.824/shardctrler"
+import "cpsc416/shardctrler2"
 import "time"
 
 //
@@ -24,7 +24,7 @@ func key2shard(key string) int {
 	if len(key) > 0 {
 		shard = int(key[0])
 	}
-	shard %= shardctrler.NShards
+	shard %= shardctrler2.NShards
 	return shard
 }
 
@@ -36,8 +36,8 @@ func nrand() int64 {
 }
 
 type Clerk struct {
-	sm       *shardctrler.Clerk
-	config   shardctrler.Config
+	sm       *shardctrler2.Clerk
+	config   shardctrler2.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
 }
@@ -53,7 +53,7 @@ type Clerk struct {
 //
 func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
-	ck.sm = shardctrler.MakeClerk(ctrlers)
+	ck.sm = shardctrler2.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
 	return ck

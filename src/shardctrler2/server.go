@@ -38,9 +38,14 @@ type retOp struct {
 func (sc *ShardCtrler) PutCommand(UID int64, rpcnum int, args interface{}) (bool, interface{}) {
 	sc.mu.Lock()
 	if ok := sc.checkApplied(UID, rpcnum); ok {
+		var callback interface{}
+		if query, isquery := args.(QueryArgs); isquery {
+			val := sc.query(query.Num)
+			callback = val
+		}
 		sc.mu.Unlock()
 		// already applied
-		return true, nil
+		return true, callback
 	}
 
 	command := Op{
@@ -59,7 +64,7 @@ func (sc *ShardCtrler) PutCommand(UID int64, rpcnum int, args interface{}) (bool
 
 	command2 := <-retChan
 	replyOK := true
-	if command2.RetOP.RpcNum == command.RpcNum &&  command2.RetOP.UID == command.UID{
+	if command2.RetOP.RpcNum == command.RpcNum && command2.RetOP.UID == command.UID {
 		replyOK = true
 	} else {
 		replyOK = false
@@ -179,15 +184,15 @@ func (sc *ShardCtrler) balance(cfg *Config) {
 			}
 		}
 
-		if min_gid == -1{
-			//no groups 
+		if min_gid == -1 {
+			//no groups
 			return
 		}
 
 		if emptySlots == 0 {
 			if max_count <= min_count+1 {
 				//balanced already
-			//fmt.Printf("After: %v \n", cfg)
+				//fmt.Printf("After: %v \n", cfg)
 				return
 			}
 		}
@@ -205,7 +210,7 @@ func (sc *ShardCtrler) balance(cfg *Config) {
 			if cfg.Shards[i] == max_gid {
 				max_idx = i
 				break
-			} 
+			}
 		}
 		cfg.Shards[max_idx] = min_gid
 	}

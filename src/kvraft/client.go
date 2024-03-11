@@ -52,7 +52,11 @@ func (ck *Clerk) Get(key string) string {
 
 	args := GetArgs{
 		Key: key,
+		UID: ck.UID,
+		RpcNum: ck.RpcNum,
 	}
+	ck.RpcNum += 1
+	
 	for {
 		reply := GetReply{}
 		ok := ck.servers[ck.LeaderId].Call("KVServer.Get", &args, &reply)
