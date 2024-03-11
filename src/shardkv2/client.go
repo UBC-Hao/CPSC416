@@ -8,17 +8,18 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "cpsc416/labrpc"
-import "crypto/rand"
-import "math/big"
-import "cpsc416/shardctrler2"
-import "time"
+import (
+	"cpsc416/labrpc"
+	"cpsc416/shardctrler2"
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
+)
 
-//
 // which shard is a key in?
 // please use this function,
 // and please do not change it.
-//
 func key2shard(key string) int {
 	shard := 0
 	if len(key) > 0 {
@@ -36,13 +37,15 @@ func nrand() int64 {
 }
 
 type Clerk struct {
+	mu       sync.Mutex
 	sm       *shardctrler2.Clerk
 	config   shardctrler2.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	UID    [10]int64
+	RpcNum int
 }
 
-//
 // the tester calls MakeClerk.
 //
 // ctrlers[] is needed to call shardctrler.MakeClerk().
@@ -50,26 +53,40 @@ type Clerk struct {
 // make_end(servername) turns a server name from a
 // Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs.
-//
 func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.sm = shardctrler2.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	for i := 0; i < shardctrler2.NShards; i++ {
+		ck.UID[i] = nrand()
+	}
+	ck.RpcNum = 1
 	return ck
 }
 
-//
 // fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 // You will have to modify this function.
-//
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args := GetArgs{
+		UID:    ck.UID[key2shard(key)],
+		RpcNum: ck.RpcNum,
+	}
+
 	args.Key = key
 
+	// NOTE:
+	// it could happen that the first success msg is omited but then the shard migrated,
+	// in this case , this shard does not contain the info anymore we should increment RpcNum in this case
+
 	for {
+		args.RpcNum = ck.RpcNum
+		ck.RpcNum += 1
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -95,16 +112,20 @@ func (ck *Clerk) Get(key string) string {
 	return ""
 }
 
-//
 // shared by Put and Append.
 // You will have to modify this function.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args := PutAppendArgs{
+		UID:    ck.UID[key2shard(key)],
+		RpcNum: ck.RpcNum,
+	}
+	ck.RpcNum += 1
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
 
 	for {
 		shard := key2shard(key)
