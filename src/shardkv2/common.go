@@ -1,6 +1,12 @@
 package shardkv
 
-import "fmt"
+import (
+	"fmt"
+	"net/http"
+	_ "net/http"
+	_ "net/http/pprof"
+	"runtime"
+)
 
 //
 // Sharded key/value server.
@@ -10,6 +16,11 @@ import "fmt"
 //
 // You will have to modify these definitions.
 //
+
+func init() {
+	runtime.SetMutexProfileFraction(1)
+	go http.ListenAndServe("localhost:6060", nil)
+}
 
 const (
 	OK             = "OK"
@@ -29,8 +40,9 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	UID    int64  // uid for the client
+	UID    int64 // uid for the client
 	RpcNum int
+	CfgNum int 
 }
 
 type PutAppendReply struct {
@@ -42,6 +54,7 @@ type GetArgs struct {
 	// You'll have to add definitions here.
 	UID    int64 // uid for the client
 	RpcNum int
+	CfgNum int 
 }
 
 type GetReply struct {
@@ -49,6 +62,30 @@ type GetReply struct {
 	Value string
 }
 
+type RequestShardsArgs struct {
+	ShardsOldNum []int
+	Shards  []int
+	Me int 
+	CfgNum int 
+	//MigrateNumOnly bool
+}
+
+type RequestShardsReply struct {
+	//MigrateNum int
+	IsOk    bool
+	OutDate bool
+	Applied map[int64]int
+	Data    map[int]map[string]string
+}
+
+type ACKShardsArgs struct{
+	Shard int
+	Num int
+}
+
+type ACKShardsReply struct{
+	OK bool
+}
 
 const (
 	PutAction    = "Put"
@@ -56,9 +93,19 @@ const (
 	GetAction    = "Get"
 )
 const Debug = false
+const Debug2 = true
+const Verbose = 10
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug{
+	if Debug {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
+
+func DPrintf2(format string, a ...interface{}) (n int, err error) {
+	if Debug2 {
 		fmt.Printf(format, a...)
 	}
 	return

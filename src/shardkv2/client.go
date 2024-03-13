@@ -59,7 +59,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.make_end = make_end
 	// You'll have to add code here.
 	for i := 0; i < shardctrler2.NShards; i++ {
-		ck.UID[i] = nrand()
+		ck.UID[i] = (nrand()/10)*10 + int64(i)
 	}
 	ck.RpcNum = 1
 	return ck
@@ -89,6 +89,7 @@ func (ck *Clerk) Get(key string) string {
 		ck.RpcNum += 1
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.CfgNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -99,8 +100,10 @@ func (ck *Clerk) Get(key string) string {
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
+					DPrintf2("Wrong Shards Detected!\n")
 					break
 				}
+				DPrintf2("Wrong Leader!\n")
 				// ... not ok, or ErrWrongLeader
 			}
 		}
@@ -130,17 +133,22 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.CfgNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
+			DPrintf2("Try Put(%v,%v)\n",key,value)
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
+					DPrintf2("SUCCESS %v\n", key)
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
+					DPrintf2("Wrong Shards, failed! %v\n", key)
 					break
 				}
+				// something's wrong, the clerk endlessly tries to add log will cause problem.
 				// ... not ok, or ErrWrongLeader
 			}
 		}
