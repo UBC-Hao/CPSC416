@@ -633,7 +633,7 @@ func (rf *Raft) gatherVote(term int) {
 			if !(rf.state == CANDIDATE && rf.currentTerm == term) {
 				// rf is no longer a candidate
 				rf.mu.Unlock()
-				return
+				continue
 			}
 
 			if reply.Term < rf.currentTerm {

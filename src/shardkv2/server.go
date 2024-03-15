@@ -35,7 +35,7 @@ type ShardKV struct {
 	persister 	*raft.Persister
 
 	// Your definitions here.
-	mck *shardctrler2.Clerk // used to communicate with the clerk
+	mck *shardctrler2.Clerk 
 	currCfg *shardctrler2.Config
 
 	replyChans map[int]chan *retOp
@@ -294,7 +294,6 @@ func (sc *ShardKV) handleApplyMsg() {
 		if query, ok := cmd.Args.(GetArgs); ok {
 			retCmd.CallBack, retCmd.rightShard = sc.get(query.Key)
 			if retCmd.CallBack == nil{
-			//	fmt.Println("Impossible?!")
 			}
 		}
 

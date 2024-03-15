@@ -337,6 +337,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string, 1000)
 	kv.die = make(chan struct{})
 	kv.persister = persister
+	kv.readFromSnapshot(persister.ReadSnapshot())
 
 	// You may need initialization code here.
 
