@@ -34,7 +34,13 @@ lab1: build-mrapps build-mr
 	@echo "-- lab1 built successfully"
 
 lab2: 
-	@echo "-- skipping the build phase for lab2a"
+	@echo "-- skipping the build phase for lab2"
+	
+lab3: 
+	@echo "-- skipping the build phase for lab3"
+	
+lab4: 
+	@echo "-- skipping the build phase for lab4"
 
 tar: $(lab_name)
 	@echo "preparing a tar for $(lab_name) for student $(student_id)"
