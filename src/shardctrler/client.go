@@ -1,5 +1,4 @@
 package shardctrler
-
 //
 // Shardctrler clerk.
 //
@@ -8,10 +7,14 @@ import "cpsc416/labrpc"
 import "time"
 import "crypto/rand"
 import "math/big"
+import "sync"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	UID int64
+	RpcNum int 
+	mu sync.Mutex
 }
 
 func nrand() int64 {
@@ -25,13 +28,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.UID = nrand()
+	ck.RpcNum = 1
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args := &QueryArgs{
+		Num: num,
+		RpcNum: ck.RpcNum,
+		UID: ck.UID,
+	}
+	ck.RpcNum += 1
+	
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -46,9 +57,17 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args := &JoinArgs{
+		RpcNum: ck.RpcNum,
+		UID: ck.UID,
+	}
+	ck.RpcNum += 1
 	// Your code here.
 	args.Servers = servers
+	
 
 	for {
 		// try each known server.
@@ -64,9 +83,16 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args := &LeaveArgs{
+		RpcNum: ck.RpcNum,
+		UID: ck.UID,
+	}
+	ck.RpcNum += 1
 	args.GIDs = gids
+	
 
 	for {
 		// try each known server.
@@ -82,10 +108,17 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args := &MoveArgs{
+		RpcNum: ck.RpcNum,
+		UID: ck.UID,
+	}
+	ck.RpcNum += 1
 	args.Shard = shard
 	args.GID = gid
+	
 
 	for {
 		// try each known server.
