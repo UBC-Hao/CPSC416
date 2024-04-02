@@ -8,11 +8,21 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "cpsc416/labrpc"
-import "crypto/rand"
-import "math/big"
-import "cpsc416/shardctrler"
-import "time"
+import (
+	"cpsc416/labrpc"
+	"cpsc416/shardctrler"
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
+)
+
+func nrand() int64 {
+	max := big.NewInt(int64(1) << 62)
+	bigx, _ := rand.Int(rand.Reader, max)
+	x := bigx.Int64()
+	return x
+}
 
 // which shard is a key in?
 // please use this function,
@@ -26,18 +36,14 @@ func key2shard(key string) int {
 	return shard
 }
 
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
-}
-
 type Clerk struct {
 	sm       *shardctrler.Clerk
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu     sync.Mutex
+	UID    int64
+	RpcNum int
 }
 
 // the tester calls MakeClerk.
@@ -51,6 +57,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
+	ck.UID = nrand()
+	ck.RpcNum = 1
 	// You'll have to add code here.
 	return ck
 }
@@ -60,24 +68,40 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // keeps trying forever in the face of all other errors.
 // You will have to modify this function.
 func (ck *Clerk) Get(key string) string {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	args := GetArgs{}
 	args.Key = key
-
+	args.Shard = key2shard(key)
+	
 	for {
+		args.UID = ck.UID
+		args.RpcNum = ck.RpcNum
+		ck.RpcNum += 1
+
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
+			retry:
 				srv := ck.make_end(servers[si])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
+				if ok && reply.Err == ErrDup {
+					//duplicate request, send the get request again.
+					args.RpcNum = ck.RpcNum
+					ck.RpcNum += 1
+					goto retry
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
+				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					//DPrintf("Get %v, %v", key,reply.Value)
+					return reply.Value
+				}
+				// not a leader, continue searching
 				// ... not ok, or ErrWrongLeader
 			}
 		}
@@ -92,11 +116,23 @@ func (ck *Clerk) Get(key string) string {
 // shared by Put and Append.
 // You will have to modify this function.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	DPrintf("Send Put %v , %v", key, value )
+
 	args := PutAppendArgs{}
 	args.Key = key
 	args.Value = value
 	args.Op = op
+	args.RpcNum = ck.RpcNum
+	args.Shard = key2shard(key)
+	args.UID = ck.UID
+	ck.RpcNum += 1
 
+	// c -> s1 on cluster 1 : s1 updated succesfully but failed to reply, crashed, all server in the cluster 1 down.
+	// configuration changed
+	// c -> s2 on cluster 2: should reply OK due to duplicate request
 
 	for {
 		shard := key2shard(key)
@@ -106,7 +142,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
+				if ok && (reply.Err == OK || reply.Err == ErrDup) {
+					DPrintf("PUT Success %v, %v", key, value )
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {

@@ -205,6 +205,7 @@ func TestSnapshot(t *testing.T) {
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
+	
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -861,7 +862,7 @@ func TestChallenge2Unaffected(t *testing.T) {
 	// LEAVE 100
 	// 101 doesn't get a chance to migrate things previously owned by 100
 	cfg.leave(0)
-
+	
 	// Wait to make sure clients see new config
 	<-time.After(1 * time.Second)
 
