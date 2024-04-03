@@ -58,11 +58,17 @@ func (ck *Clerk) Get(key string) string {
 	ck.RpcNum += 1
 	
 	for {
+		retry:
 		reply := GetReply{}
 		ok := ck.servers[ck.LeaderId].Call("KVServer.Get", &args, &reply)
+		if ok && reply.Err == DUPGET{
+			args.RpcNum = ck.RpcNum
+			ck.RpcNum += 1
+			goto retry
+		}
 		if !ok || reply.Err!=OK {
 			ck.GetNewLeader()
-		}else{
+		}else {
 			return reply.Value
 		}
 	}

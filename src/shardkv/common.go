@@ -176,9 +176,13 @@ type ShardStateChange struct{
 	Data Shard // for updating shard
 }
 
-func assert(a bool) {
+func assert(a bool, b ...string) {
 	if !a {
-		panic("Impossible!")
+		if len(b)!=0{
+			panic(b[0])
+		}else{
+			panic("Impossible!")
+		}
 	}
 }
 

@@ -61,7 +61,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 		reply.Value = retstr
 	}else{
-		fmt.Printf("Something's wrong 2\n")
+		reply.Err = DUPGET
 	}
 }
 
@@ -77,14 +77,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (sc *KVServer) PutCommand(UID int64, rpcnum int, args interface{}) (bool, interface{}) {
 	sc.mu.Lock()
 	if ok := sc.checkApplied(UID, rpcnum); ok {
-		var callback interface{}
-		if query, isquery := args.(GetArgs); isquery {
-			val := sc.get(query.Key)
-			callback = val
-		}
 		sc.mu.Unlock()
 		// already applied
-		return true, callback
+		return true, nil
 	}
 
 	command := Op{

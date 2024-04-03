@@ -119,7 +119,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
-	DPrintf("Send Put %v , %v", key, value )
+	//DPrintf("Send Put %v , %v", key, value )
 
 	args := PutAppendArgs{}
 	args.Key = key
@@ -143,7 +143,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrDup) {
-					DPrintf("PUT Success %v, %v", key, value )
+					//DPrintf("PUT Success %v, %v", key, value )
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {

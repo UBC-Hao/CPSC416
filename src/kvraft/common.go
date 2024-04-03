@@ -11,6 +11,7 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 	CommitFailed   = "CommitFailed"
+	DUPGET = "DUP"
 )
 
 const (

@@ -717,8 +717,9 @@ func (rf *Raft) applyLogs() {
 				SnapshotTerm:  rf.log[0].Term,
 				SnapshotIndex: rf.log[0].Index,
 			}
-			rf.applySnapshot(msg)
 			rf.lastApplied = rf.log[0].Index
+			rf.applySnapshot(msg)
+			//rf.lastApplied = rf.log[0].Index//log[0].Index could be changed here, so it should be moved before
 		}
 		for i := rf.lastApplied + 1; i <= maxApply; i++ {
 			toCommit = append(toCommit, rf.getLog(i))

@@ -38,14 +38,9 @@ type retOp struct {
 func (sc *ShardCtrler) PutCommand(UID int64, rpcnum int, args interface{}) (bool, interface{}) {
 	sc.mu.Lock()
 	if ok := sc.checkApplied(UID, rpcnum); ok {
-		var callback interface{}
-		if query, isquery := args.(QueryArgs); isquery {
-			val := sc.query(query.Num)
-			callback = val
-		}
 		sc.mu.Unlock()
 		// already applied
-		return true, callback
+		return true, nil
 	}
 
 	command := Op{
@@ -76,7 +71,6 @@ func (sc *ShardCtrler) PutCommand(UID int64, rpcnum int, args interface{}) (bool
 	close(retChan)
 	sc.mu.Unlock()
 	return replyOK, command2.CallBack
-
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
@@ -104,6 +98,9 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	if callback != nil {
 		cfg, _ := callback.(Config)
 		reply.Config = cfg
+	} else {
+		//nil means duplicate
+		reply.Err = DUPLICATE
 	}
 }
 

@@ -30,6 +30,7 @@ type Config struct {
 
 const (
 	OK = "OK"
+	DUPLICATE = "DUP"
 )
 
 type Err string

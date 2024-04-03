@@ -8,6 +8,7 @@ import (
 	"cpsc416/shardctrler"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,15 +43,15 @@ type ShardKV struct {
 	// Your definitions here.
 	replyChans map[int]chan *retOp
 	mck        *shardctrler.Clerk
-	isLeader   bool
-	persister *raft.Persister
+	isLeader   int32
+	persister  *raft.Persister
+	CfgCache   map[int]shardctrler.Config
+	muCache    sync.Mutex
 
 	// state machine, we can only change the following in handleApplyMsg
 	Shards ShardsData
 	Config shardctrler.Config // Current Config
 }
-
-
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	ok, callback := kv.PutCommand(true, args.Shard, args.UID, args.RpcNum, *args)
@@ -70,7 +71,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	DPrintf("GOT PUTAPPEND REQUEST")
+	//DPrintf("GOT PUTAPPEND REQUEST")
+	
 	ok, callback := kv.PutCommand(true, args.Shard, args.UID, args.RpcNum, *args)
 	if ok {
 		reply.Err = OK
@@ -135,7 +137,7 @@ func (sc *ShardKV) PutCommand(ClerkOp bool, ShardID int, UID int64, rpcnum int, 
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	//for debug purpose
-	kv.isLeader = false
+	atomic.StoreInt32(&kv.isLeader, 0)
 }
 
 // servers[] contains the ports of the servers in this group.
@@ -183,13 +185,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 	kv.persister = persister
 
-
 	// Your initialization code here.
 
 	// Use something like this to talk to the shardctrler:
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 	kv.replyChans = make(map[int]chan *retOp, 1000)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.CfgCache = make(map[int]shardctrler.Config)
 
 	for i := 0; i < NShards; i++ {
 		kv.Shards[i] = &Shard{}
@@ -240,7 +242,7 @@ func (sc *ShardKV) handleApplyMsg() {
 			opChan <- &retCmd
 		}
 
-		if sc.maxraftstate != -1 && sc.persister.RaftStateSize() >= sc.maxraftstate * 9 / 10{
+		if sc.maxraftstate != -1 && sc.persister.RaftStateSize() >= sc.maxraftstate*9/10 {
 			sc.dumpCurrentState(applyMsg.CommandIndex)
 		}
 		sc.mu.Unlock()
@@ -281,7 +283,7 @@ func (kv *ShardKV) handleServerOp(cmd *Op, applyMsg *raft.ApplyMsg, retCmd *retO
 		kv.applyNewCfg(newcfgEvent.Config)
 	}
 
-	if shard, ok := cmd.Args.(ShardStateChange); ok{
+	if shard, ok := cmd.Args.(ShardStateChange); ok {
 		kv.applyShardStateChange(shard)
 	}
 }
@@ -340,10 +342,11 @@ func (kv *ShardKV) setApplied(ShardID int, UID int64, rpcnum int) {
 
 // called within mutex
 func (kv *ShardKV) dumpCurrentState(index int) {
+	kv.print_once(0,"Dump Snapshot %v", index)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.Config)
-	for _,shard := range(kv.Shards){
+	for _, shard := range kv.Shards {
 		e.Encode(*shard)
 	}
 	snapshot := w.Bytes()
@@ -352,35 +355,35 @@ func (kv *ShardKV) dumpCurrentState(index int) {
 
 // called outside of a mutex
 func (kv *ShardKV) readFromSnapshot(data []byte) {
-
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	kv.print_once(0,"Read Snapshot")
 
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	
+
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var cfg shardctrler.Config
 	d.Decode(&cfg)
 	var shards [NShards]*Shard
-	for i := 0; i< NShards; i++{
+	for i := 0; i < NShards; i++ {
 		var shard Shard
 		d.Decode(&shard)
 		shards[i] = &shard
 		//DPrintf("EXAMPLE output %v", shard.Data)
 	}
 	kv.Shards = shards
-	kv.Config = cfg 
+	kv.Config = cfg
 }
 
 func (kv *ShardKV) leaderDaemon(daemontype DaemonType) {
 	for {
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 		_, IsLeader := kv.rf.GetState()
 		kv.mu.Lock()
-		kvisLeader := kv.isLeader
+		kvisLeader := atomic.LoadInt32(&kv.isLeader) == 1
 		kv.mu.Unlock()
 		if !kvisLeader && IsLeader {
 			// first becomes a Leader, sends an empty log
@@ -388,13 +391,18 @@ func (kv *ShardKV) leaderDaemon(daemontype DaemonType) {
 			kv.PutCommand(false, -1, -1, -1, DummyLog{})
 		}
 		kv.mu.Lock()
-		kv.isLeader = IsLeader
+		leaderstore := int32(0)
+		if IsLeader {
+			leaderstore = 1
+		}
+		atomic.StoreInt32(&kv.isLeader, leaderstore)
+
 		kv.mu.Unlock()
 		if !IsLeader {
 			continue
 		}
 		// Leader: responsible for checking udpates
-		switch daemontype{
+		switch daemontype {
 		case CHECKSHARDS:
 			kv.checkShards()
 		case CHECKCONFIG:
@@ -405,85 +413,86 @@ func (kv *ShardKV) leaderDaemon(daemontype DaemonType) {
 	}
 }
 
-func (kv *ShardKV) checkShardDeleting(shardid int, currNum int, nextCfg shardctrler.Config){
+func (kv *ShardKV) sendStateChangeOP(op ShardStateChange) {
+	kv.PutCommand(false, -1, -1, -1, op)
+}
+
+func (kv *ShardKV) checkShardDeleting(shardid int, currNum int, nextCfg shardctrler.Config) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	// we check if shardid in the nextCfg already got the shards ?
 	//kv.print_once(4,"Try deleting Shard %v", shardid)
 	delargs := DelShardArgs{
 		CfgNum: currNum,
-		Shard: shardid,
+		Shard:  shardid,
 	}
 	delCheckFrom := nextCfg.Groups[nextCfg.Shards[shardid]]
-	for _,str := range delCheckFrom{
+	for _, str := range delCheckFrom {
 		srv := kv.make_end(str)
 		var replyargs DelShardReply
 		kv.mu.Unlock()
 		ok := srv.Call("ShardKV.DelShard", &delargs, &replyargs)
 		kv.mu.Lock()
 		if ok {
-			if !replyargs.IsLeader{
-				kv.mu.Unlock()
-				time.Sleep(30 * time.Millisecond)
-				kv.mu.Lock()
+			if !replyargs.IsLeader {
 				continue
 			}
-			if replyargs.OK{
-				// pack the shard info and send it to the state machine 
+			if replyargs.OK {
+				// pack the shard info and send it to the state machine
 				//blocking call
 				kv.mu.Unlock()
 				kv.PutCommand(false, -1, -1, -1, ShardStateChange{
-					ShardId: shardid,
+					ShardId:   shardid,
 					FromState: HANDING,
-					FromNum: currNum,
+					FromNum:   currNum,
 					NextState: EMPTY,
-					NextNum: currNum + 1, 
+					NextNum:   currNum + 1,
 				})
 				kv.mu.Lock()
 				break
-			}else{
+			} else {
 				return // we deal this later.
 			}
 		}
 	}
 }
 
-
-func (kv *ShardKV) checkShardUpdating(shardid int ,currCfg shardctrler.Config){
+func (kv *ShardKV) checkShardUpdating(shardid int, currCfg shardctrler.Config) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	// [ 1 1 1 1 ] -> [ 2 2 2 2],  2 asks for data from 1
 	//kv.print_once(4,"Try updating Shard %v", shardid)
 	getargs := GetShardArgs{
-				CfgNum: currCfg.Num,
-				Shard: shardid,
-				} 
-				
+		CfgNum: currCfg.Num,
+		Shard:  shardid,
+	}
+
 	getFrom := currCfg.Groups[currCfg.Shards[shardid]]
-	for _,str := range getFrom{
+	for _, str := range getFrom {
 		srv := kv.make_end(str)
 		var replyargs GetShardReply
 		kv.mu.Unlock()
 		ok := srv.Call("ShardKV.GetShard", &getargs, &replyargs)
 		kv.mu.Lock()
 		if ok {
-			if !replyargs.IsLeader{
-				kv.mu.Unlock()
-				time.Sleep(30 * time.Millisecond)
-				kv.mu.Lock()
+			if !replyargs.IsLeader {
 				continue
 			}
-			if replyargs.OK{
-				// pack the shard info and send it to the state machine 
+			if replyargs.OK {
+				// pack the shard info and send it to the state machine
 				//blocking call
 				kv.mu.Unlock()
 				kv.PutCommand(false, -1, -1, -1, ShardStateChange{
-					ShardId: shardid,
+					ShardId:   shardid,
 					FromState: UPDATING,
-					FromNum: currCfg.Num,
+					FromNum:   currCfg.Num,
 					NextState: SERVING,
-					NextNum: currCfg.Num + 1, 
-					Data: replyargs.Shard,
+					NextNum:   currCfg.Num + 1,
+					Data:      replyargs.Shard,
 				})
 				kv.mu.Lock()
 				break
-			}else{
+			} else {
 				return // we deal this later.
 			}
 		}
@@ -495,141 +504,137 @@ func (kv *ShardKV) checkShards() {
 	defer kv.mu.Unlock()
 	clusterCfgNum := kv.Config.Num
 
-	//For debug only
 	for _, shard := range kv.Shards {
-		if shard.Cfg >= clusterCfgNum{
+		if shard.Cfg >= clusterCfgNum {
 			continue // nothing to update
 		}
+		//for debuging
 		kv.print_once(1, "shards: %v", kv.Shards)
 		defer kv.print_once(1, "shards: %v", kv.Shards)
 		break
 	}
 
 	for shardid, shard := range kv.Shards {
-
-		if shard.Cfg >= clusterCfgNum{
+		// just in case
+		shardid := shardid
+		shard := shard
+		if shard.Cfg >= clusterCfgNum {
 			continue // nothing to update
 		}
-
+		toquery := shard.Cfg
 		kv.mu.Unlock()
-		currCfg := kv.query(shard.Cfg)
-		nextCfg := kv.query(shard.Cfg + 1)
-		assert(currCfg.Num == shard.Cfg)
-		assert(nextCfg.Num == shard.Cfg + 1)
+		currCfg := kv.query(toquery)
+		nextCfg := kv.query(toquery + 1)
+		//DPrintf("%v ,%v", currCfg.Num, toquery)
 		kv.mu.Lock()
 
-		switch shard.State{
+		switch shard.State {
 		case UPDATING:
 			// pull data from other servers, call GetShards
 			// u i -> s i+1
 			// checkShardUpdating does not gurantee updating successfully
-			kv.checkShardUpdating(shardid, currCfg)
+			go kv.checkShardUpdating(shardid, currCfg)
 		case HANDING:
 			// ask others, can I delete this now?
 			// h i -> e i+1
-			kv.checkShardDeleting(shardid, currCfg.Num, nextCfg)
+			go kv.checkShardDeleting(shardid, currCfg.Num, nextCfg)
 		case EMPTY:
 			// e i -> e i+1 if not serving in the next round
 			// e i -> u i if needs to serve
-			if nextCfg.Shards[shardid] == kv.gid{
-				kv.mu.Unlock()
-				kv.PutCommand(false, -1, -1, -1, ShardStateChange{
-					ShardId: shardid,
+			if nextCfg.Shards[shardid] == kv.gid {
+				go kv.sendStateChangeOP(ShardStateChange{
+					ShardId:   shardid,
 					FromState: EMPTY,
-					FromNum: currCfg.Num,
+					FromNum:   currCfg.Num,
 					NextState: UPDATING,
-					NextNum: currCfg.Num, 
+					NextNum:   currCfg.Num,
 				})
-				kv.mu.Lock()
-			}else{
-				kv.mu.Unlock()
-				kv.PutCommand(false, -1, -1, -1, ShardStateChange{
-					ShardId: shardid,
+			} else {
+				go kv.sendStateChangeOP(ShardStateChange{
+					ShardId:   shardid,
 					FromState: EMPTY,
-					FromNum: currCfg.Num,
+					FromNum:   currCfg.Num,
 					NextState: EMPTY,
-					NextNum: currCfg.Num + 1, 
+					NextNum:   currCfg.Num + 1,
 				})
-				kv.mu.Lock()
 			}
 		case SERVING:
 			// s i -> s i+1 continue serving if possible
 			// s i -> h i   if not in the new cfg
 			if nextCfg.Shards[shardid] == kv.gid {
-				kv.mu.Unlock()
-				kv.PutCommand(false, -1, -1, -1, ShardStateChange{
-					ShardId: shardid,
+				go kv.sendStateChangeOP(ShardStateChange{
+					ShardId:   shardid,
 					FromState: SERVING,
-					FromNum: currCfg.Num,
+					FromNum:   currCfg.Num,
 					NextState: SERVING,
-					NextNum: currCfg.Num + 1, 
+					NextNum:   currCfg.Num + 1,
 				})
-				kv.mu.Lock()
-			}else{
-				kv.mu.Unlock()
-				kv.PutCommand(false, -1, -1, -1, ShardStateChange{
-					ShardId: shardid,
+
+			} else {
+				go kv.sendStateChangeOP(ShardStateChange{
+					ShardId:   shardid,
 					FromState: SERVING,
-					FromNum: currCfg.Num,
+					FromNum:   currCfg.Num,
 					NextState: HANDING,
-					NextNum: currCfg.Num, 
+					NextNum:   currCfg.Num,
 				})
-				kv.mu.Lock()
 			}
 		}
 	}
 }
 
-
-func (kv *ShardKV) applyShardStateChange(event ShardStateChange){
+func (kv *ShardKV) applyShardStateChange(event ShardStateChange) {
 
 	old := kv.Shards[event.ShardId]
-	if old.Cfg != event.FromNum || old.State != event.FromState{
-		kv.print_once(3,"Shard Update Abort: Stale 2, %v, %v", old, event.FromNum)
-		return 
+	if old.Cfg != event.FromNum || old.State != event.FromState {
+		kv.print_once(3, "Shard Update Abort: Stale 2, %v, %v", old, event.FromNum)
+		return
 	}
 	//kv.print_once(1, "shards: %v", kv.Shards)
 	assert(old.Cfg == event.FromNum)
 
-	if event.Data.Cfg != 0{
+	if event.Data.Cfg != 0 {
 		event.Data.State = old.State
 		event.Data.Cfg = old.Cfg
-		kv.Shards[event.ShardId] = &event.Data
+		newshard := event.Data.copy()
+		kv.Shards[event.ShardId] = &newshard
 		old = kv.Shards[event.ShardId]
 	}
-	
+
 	old.Cfg = event.NextNum
 	old.State = event.NextState
-	if event.NextState == EMPTY{
-		old.Data = nil  
-		old.Applied = nil 
+	if event.NextState == EMPTY {
+		old.Data = nil
+		old.Applied = nil
 	}
 	//kv.print_once(1, "shards: %v", kv.Shards)
 }
 
 func (kv *ShardKV) checkConfig() {
-	kv.mu.Lock()
-	currNum := kv.Config.Num
-	kv.mu.Unlock()
+	for {
+		kv.mu.Lock()
+		currNum := kv.Config.Num
+		kv.mu.Unlock()
 
-	newcfg := kv.query(currNum + 1)
-	if newcfg.Num <= currNum {
-		return
+		newcfg := kv.query(currNum + 1)
+		if newcfg.Num <= currNum {
+			return
+		}
+		kv.mu.Lock()
+		DPrintf("%v -> %v", kv.Config.Shards, newcfg.Shards)
+		kv.mu.Unlock()
+		kv.PutCommand(false, -1, -1, -1, NewConfig{Config: newcfg})
 	}
-	kv.mu.Lock()
-	DPrintf("%v -> %v", kv.Config.Shards,newcfg.Shards)
-	kv.mu.Unlock()
-	kv.PutCommand(false, -1, -1, -1, NewConfig{Config: newcfg})
 }
 
 func (kv *ShardKV) applyNewCfg(newcfg shardctrler.Config) {
-	if newcfg.Num <= kv.Config.Num {
+	if newcfg.Num != kv.Config.Num+1 {
 		return
 	}
 	kv.print_once(0, "shards: %v", kv.Shards)
 	defer kv.print_once(0, "shards: %v", kv.Shards)
 
-	assert(newcfg.Num == kv.Config.Num+1)
+	assert(newcfg.Num == kv.Config.Num+1, fmt.Sprintf("%v, %v", newcfg.Num, kv.Config.Num)) // panic? why?????
 	for idx, shard := range kv.Shards {
 		if newcfg.Shards[idx] == kv.gid {
 			// I need to serve this shard
@@ -638,11 +643,11 @@ func (kv *ShardKV) applyNewCfg(newcfg shardctrler.Config) {
 				// nobody served before
 				shard.State = SERVING
 				shard.Cfg = newcfg.Num
-			} else if shard.Cfg == newcfg.Num -1 {
-				switch(shard.State){
+			} else if shard.Cfg == newcfg.Num-1 {
+				switch shard.State {
 				case SERVING:
 					// s i  -> s i+1
-					assert(kv.gid == kv.Config.Shards[idx] && shard.Cfg == newcfg.Num - 1)
+					assert(kv.gid == kv.Config.Shards[idx] && shard.Cfg == newcfg.Num-1)
 					//continue serving
 					shard.Cfg = newcfg.Num
 				case EMPTY:
@@ -650,20 +655,20 @@ func (kv *ShardKV) applyNewCfg(newcfg shardctrler.Config) {
 					//cfg stays the same
 					shard.State = UPDATING
 				}
-			} 
-		} else if shard.Cfg == newcfg.Num - 1{
+			}
+		} else if shard.Cfg == newcfg.Num-1 {
 			if shard.State == SERVING {
 				// s_i -> h_i
 				// I need to give this shard to others
 				shard.State = HANDING
 				assert(shard.Cfg == kv.Config.Num)
-			}else if shard.State == EMPTY{ 
+			} else if shard.State == EMPTY {
 				// e_i  -> e_i+1
 				shard.Cfg = newcfg.Num
 			}
 		}
 	}
-	
+
 	kv.Config = newcfg
 }
 
@@ -684,6 +689,7 @@ func (kv *ShardKV) get(shardId int, key string) (bool, string) {
 
 func (kv *ShardKV) putAppend(shardId int, key string, val_append string, action string) bool {
 	if kv.isServing(shardId) {
+		kv.print_once(0,"PutAppend(%v), cfg=%v",key+","+val_append, kv.Shards[shardId])
 		//DPrintf("PUT %v, %v", key, val_append )
 		val, ok2 := kv.Shards[shardId].Data[key]
 		if !ok2 {
@@ -696,8 +702,6 @@ func (kv *ShardKV) putAppend(shardId int, key string, val_append string, action 
 		}
 
 		return true
-	}else{
-		DPrintf("I DO NOT SERVE THIS SHARD")
 	}
 	return false
 }
@@ -708,8 +712,8 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	if _,isLeader := kv.rf.GetState(); !isLeader{
-		return 
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		return
 	}
 
 	reply.IsLeader = true
@@ -717,9 +721,9 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	if shard.State == HANDING && shard.Cfg == args.CfgNum {
 		reply.Shard = shard.copy()
 		reply.OK = true
-		DPrintf("Shard granted: %v", shard )
+		//DPrintf("Shard granted: %v", shard)
 	} else {
-		DPrintf("Shard not granted: Asks for %v, while I have %v", args.CfgNum ,shard )
+		//DPrintf("Shard not granted: Asks for %v, while I have %v", args.CfgNum, shard)
 		reply.OK = false
 	}
 }
@@ -729,29 +733,38 @@ func (kv *ShardKV) DelShard(args *DelShardArgs, reply *DelShardReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	if _,isLeader := kv.rf.GetState(); !isLeader{
-		return 
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		return
 	}
 
 	reply.IsLeader = true
 	shard := kv.Shards[args.Shard]
 	if shard.Cfg > args.CfgNum {
 		reply.OK = true
-		DPrintf("Shard deletion granted: %v", shard.ShardID )
+		//DPrintf("Shard deletion granted: %v", shard.ShardID)
 	} else {
-		DPrintf("Shard deletion not granted: Asks for %v, while I have %v", args.CfgNum ,shard )
+		//DPrintf("Shard deletion not granted: Asks for %v, while I have %v", args.CfgNum, shard)
 		reply.OK = false
 	}
 }
 
-func (kv *ShardKV) query(num int) shardctrler.Config{
-	// TODO: Add simple cache
-	return kv.mck.Query(num)
+func (kv *ShardKV) query(num int) shardctrler.Config {
+	kv.muCache.Lock()
+	defer kv.muCache.Unlock()
+
+	if cfg, ok := kv.CfgCache[num]; ok {
+		return cfg
+	}
+	cfg := kv.mck.Query(num)
+	kv.CfgCache[cfg.Num] = cfg
+	return cfg
 }
 
-func (kv *ShardKV) print_once(verbose int, format string, a ...interface{}){
-	if !kv.isLeader{ return }
-	s:=fmt.Sprintf("[%v] ", kv.gid)
-	s+=format
-	DPrintf(s, a)
+func (kv *ShardKV) print_once(verbose int, format string, a ...interface{}) {
+	if atomic.LoadInt32(&kv.isLeader) == 0 {
+		return
+	}
+	s := fmt.Sprintf("[%v] ", kv.gid)
+	s += format
+	DPrintf(s, a...)
 }

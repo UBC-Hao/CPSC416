@@ -47,10 +47,16 @@ func (ck *Clerk) Query(num int) Config {
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
+			retry:
 			var reply QueryReply
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
 				return reply.Config
+			}
+			if ok && reply.Err == DUPLICATE{
+				args.RpcNum = ck.RpcNum
+				ck.RpcNum += 1
+				goto retry
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
