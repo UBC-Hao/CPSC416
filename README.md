@@ -74,6 +74,63 @@ ok  	cpsc416/raft	481.302s
 </details>
 
 
-## Shared Key-Value Store (No sharding) (L3)
-- L3A
-- L3B
+## Sharded Key-Value Store
+
+### Rules
+1. Only modify the states of the shards by appending and applying logs
+2. Never try to push data on one shard to another. Instead, pull data from other clusters.
+
+
+### Shard State
+Status: Updating, Handing, Serving, Empty
+Configuration Number: i
+
+### State Machine Diagram for Shards
+```mermaid
+  stateDiagram
+    state if_state1 <<choice>>
+    Empty --> Serving: if i==0
+    Empty --> if_state1
+    if_state1 --> Empty: if not serving in next cfg, i=i+1
+    if_state1 --> Updating: else, i = i
+    Updating --> Serving: after getting data, i=i+1
+Handing --> Empty: after cleaning Data,i = i+1
+    Serving --> Handing: if not serving in next cfg, i = i
+```
+
+
+<details>
+  <summary>Test results (one of 300 passes) </summary>
+  
+```
+Test: static shards ...
+  ... Passed
+Test: join then leave ...
+  ... Passed
+Test: snapshots, join, and leave ...
+  ... Passed
+Test: servers miss configuration changes...
+  ... Passed
+Test: concurrent puts and configuration changes...
+  ... Passed
+Test: more concurrent puts and configuration changes...
+  ... Passed
+Test: concurrent configuration change and restart...
+  ... Passed
+Test: unreliable 1...
+  ... Passed
+Test: unreliable 2...
+  ... Passed
+Test: unreliable 3...
+  ... Passed
+Test: shard deletion (challenge 1) ...
+  ... Passed
+Test: unaffected shard access (challenge 2) ...
+  ... Passed
+Test: partial migration shard access (challenge 2) ...
+  ... Passed
+PASS
+ok      cpsc416/shardkv 85.652s
+```
+
+</details>
