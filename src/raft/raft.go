@@ -718,11 +718,15 @@ func (rf *Raft) applyLogs() {
 				SnapshotIndex: rf.log[0].Index,
 			}
 			rf.lastApplied = rf.log[0].Index
+			for i := rf.lastApplied + 1; i <= maxApply; i++ {
+				toCommit = append(toCommit, rf.getLog(i))
+			}
+			// index might be changed and the logs might be deleted when we send the snapshot.
 			rf.applySnapshot(msg)
-			//rf.lastApplied = rf.log[0].Index//log[0].Index could be changed here, so it should be moved before
-		}
-		for i := rf.lastApplied + 1; i <= maxApply; i++ {
-			toCommit = append(toCommit, rf.getLog(i))
+		}else{
+			for i := rf.lastApplied + 1; i <= maxApply; i++ {
+				toCommit = append(toCommit, rf.getLog(i))
+			}
 		}
 		for _, v := range toCommit {
 			rf.apply(*v)
