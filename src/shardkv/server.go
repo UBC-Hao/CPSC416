@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/text/unicode/rangetable"
 )
 
 type Op struct {
@@ -677,6 +679,17 @@ func (kv *ShardKV) isServing(shardId int) bool {
 }
 
 func (kv *ShardKV) get(shardId int, key string) (bool, string) {
+	if key == "status" {
+		cfgStr := ""
+		for idx, shard:= range(kv.Shards) {
+			if shard.State == SERVING || shard.State == EMPTY{
+				cfgStr = cfgStr + fmt.Sprintf("[%v:%v:%v],", idx, shard.Cfg, len(shard.Data))
+			}else{
+				return true, "unavailable"
+			}
+		}
+		return true, cfgStr
+	}
 	if kv.isServing(shardId) {
 		val, ok := kv.Shards[shardId].Data[key]
 		if !ok {

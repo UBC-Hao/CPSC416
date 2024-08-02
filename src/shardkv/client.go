@@ -13,9 +13,85 @@ import (
 	"cpsc416/shardctrler"
 	"crypto/rand"
 	"math/big"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+var (
+	once sync.Once 
+)
+
+
+func (ck *Clerk) CheckPeriodically() {
+	go func() {
+		for {
+			next:
+			time.Sleep( 30 * time.Second)
+			cfg := ck.sm.Query(-1)
+			cfgStrs := make(map[int]string)
+			// for loop in ck.config.Groups
+			maxdata := 0
+			maxgid := 0
+			maxshardinmaxgid := 0
+			mingid := 0
+			//minshardinmingid := 0
+			mindata := int(1e9)
+			for gid := range cfg.Groups {
+				cfgStrs[gid] = ck.GetForce(gid)
+				str := cfgStrs[gid]
+				if str == "unavailable" {
+					// still transfering data, do this later
+					goto next
+				}
+				if len(str) == 0 {
+					// no data, do this later
+					goto next
+				}
+				// get the length of the data this shard responsible for
+				// [1:2:3],[4:5:6]
+				arr := strings.Split(str, ",")
+				sums := 0
+				maxshard := 0
+				maxval := 0
+				//minshard := 0
+				minval := int(1e9)
+				for _, v := range arr {
+					arr2 := strings.Split(v, ":")
+					if val,_ :=strconv.Atoi(arr2[1]); val != cfg.Num {
+						goto next // not the latest configuration
+					}
+					val2,_ := strconv.Atoi(arr2[2])
+					sums += val2
+					if val2 > maxval {
+						maxval = val2
+						maxshard,_ = strconv.Atoi(arr2[0])
+					}
+					if val2 < minval {
+						minval = val2
+					//	minshard,_ = strconv.Atoi(arr2[0])
+					}
+				}
+				if sums > maxdata {
+					maxdata = sums
+					maxgid = gid
+					maxshardinmaxgid = maxshard
+				}
+				if sums < mindata {
+					mindata = sums
+					mingid = gid
+					//minshardinmingid = minshard
+				}
+			}
+			// now let's balance the data
+			if maxgid != mingid {
+				if maxdata > 2 * mindata {
+					ck.sm.Move(maxshardinmaxgid, mingid)
+				}
+			}
+		}
+	}()
+}
 
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
@@ -60,8 +136,61 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.UID = nrand()
 	ck.RpcNum = 1
 	// You'll have to add code here.
+	once.Do(func() {
+		ck.CheckPeriodically()
+	})
 	return ck
 }
+
+
+// used to fetch information of the clusers gid.
+func (ck *Clerk) GetForce(gid int) string {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	args := GetArgs{}
+	key := "status"
+	args.Key = key
+	args.Shard = key2shard(key)
+	
+	for {
+		args.UID = ck.UID
+		args.RpcNum = ck.RpcNum
+		ck.RpcNum += 1
+
+		//shard := key2shard(key)
+		//gid := ck.config.Shards[shard]
+		if servers, ok := ck.config.Groups[gid]; ok {
+			// try each server for the shard.
+			for si := 0; si < len(servers); si++ {
+			retry:
+				srv := ck.make_end(servers[si])
+				var reply GetReply
+				ok := srv.Call("ShardKV.Get", &args, &reply)
+				if ok && reply.Err == ErrDup {
+					//duplicate request, send the get request again.
+					args.RpcNum = ck.RpcNum
+					ck.RpcNum += 1
+					goto retry
+				}
+				if ok && (reply.Err == ErrWrongGroup) {
+					break
+				}
+				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					//DPrintf("Get %v, %v", key,reply.Value)
+					return reply.Value
+				}
+				// not a leader, continue searching
+				// ... not ok, or ErrWrongLeader
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		// ask controler for the latest configuration.
+		ck.config = ck.sm.Query(-1)
+	}
+
+	return ""
+}
+
 
 // fetch the current value for a key.
 // returns "" if the key does not exist.
