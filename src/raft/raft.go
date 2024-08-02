@@ -82,6 +82,7 @@ type Raft struct {
 	F int // total number of peers is 2*F+ 1
 	// voteChan is used to collect results
 	voteChan     chan *RequestVoteReplyHelper
+	fakeVoteChan chan *RequestVoteReplyHelper
 	appendChan   chan *AppendEntriesReplyHelper
 	applyMsgChan chan ApplyMsg
 	cond         *sync.Cond
@@ -390,6 +391,7 @@ type RequestVoteReplyHelper struct {
 	server int
 }
 
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)", args.Term, args.CandidateId)
@@ -432,6 +434,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 }
 
+// example RequestVote RPC handler.
+func (rf *Raft) RequestFakeVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	DPrintf(REQV, rf.me, "<- RequestVote(%v,%v)", args.Term, args.CandidateId)
+	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		//stale
+		DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Stale", args.CandidateId)
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+	} else {
+
+		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+			rf.ConvertTo(FOLLOWER)
+			rf.resetTimer() // TODO: test if this line should be removed.
+			rf.votedFor = -1
+		}
+
+		reply.Term = rf.currentTerm
+		if rf.votedFor != args.CandidateId && rf.votedFor != -1 {
+			DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Already voted for %v", args.CandidateId, rf.votedFor)
+			reply.VoteGranted = false
+		} else if rf.votedFor == args.CandidateId {
+			reply.VoteGranted = true
+		} else {
+			myLastLog := rf.log[len(rf.log)-1]
+			if myLastLog.Term > args.LastLogTerm || (myLastLog.Term == args.LastLogTerm && myLastLog.Index > args.LastLogIndex) {
+				DPrintf(LOG1, rf.me, "VOTE NOT GRANTED TO %v Reason: Not the latest LOG", args.CandidateId)
+				reply.VoteGranted = false
+			} else {
+				DPrintf(LOG2, rf.me, "VOTE GRANTED TO %v", args.CandidateId)
+				//rf.votedFor = args.CandidateId
+				reply.VoteGranted = true
+			}
+		}
+	}
+	rf.persist()
+
+}
+
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -464,6 +508,18 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 	ok := rf.Call(server, "Raft.RequestVote", args, reply)
 	if ok && !rf.killed() {
 		rf.voteChan <- &RequestVoteReplyHelper{
+			reply:  *reply,
+			server: server,
+		}
+	}
+	return ok
+}
+
+func (rf *Raft) sendRequestFakeVote(server int, args *RequestVoteArgs) bool {
+	reply := &RequestVoteReply{}
+	ok := rf.Call(server, "Raft.RequestFakeVote", args, reply)
+	if ok && !rf.killed() {
+		rf.fakeVoteChan <- &RequestVoteReplyHelper{
 			reply:  *reply,
 			server: server,
 		}
@@ -558,6 +614,19 @@ func (rf *Raft) ConvertTo(newstate role) {
 		//rf.SendHeartBeats() (not neccessary, ticker will be executed after this)
 	}
 }
+func (rf *Raft) SendAllFakeVoteReq() {
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			send := &RequestVoteArgs{
+				Term:         rf.currentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: rf.log[len(rf.log)-1].Index,
+				LastLogTerm:  rf.log[len(rf.log)-1].Term,
+			}
+			go rf.sendRequestFakeVote(i, send)
+		}
+	}
+}
 
 // this is non-blocking, should only be called within mutex
 func (rf *Raft) SendAllVoteReq() {
@@ -573,6 +642,7 @@ func (rf *Raft) SendAllVoteReq() {
 		}
 	}
 }
+
 
 func (rf *Raft) buildSendAppendEntries(i int) {
 	rf.lastSend[i] = time.Now()
@@ -617,6 +687,67 @@ func voteTimeout() time.Duration {
 	ms := 100 + HB_INTERVAL_RAW + (rand.Int63() % (2 * HB_INTERVAL_RAW)) //(2-4) * HB_INTERVAL_RAW
 	return time.Duration(ms) * time.Millisecond
 }
+
+//blocking function
+func (rf *Raft) tryGatherVote(term int) bool{
+	num := 1
+	rndTime := voteTimeout()
+	timeout := time.After(rndTime)
+	for {
+		select {
+		case replyHelper := <-rf.fakeVoteChan:
+			reply := replyHelper.reply
+			rf.mu.Lock()
+
+			if !(rf.state == CANDIDATE && rf.currentTerm == term) {
+				// rf is no longer a candidate
+				rf.mu.Unlock()
+				continue
+			}
+
+			if reply.Term < rf.currentTerm {
+				//stale, do nothing
+				rf.mu.Unlock()
+				continue
+			}
+
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.ConvertTo(FOLLOWER)
+				rf.votedFor = -1
+				rf.persist()
+				rf.mu.Unlock()
+				return false
+			}
+
+			if rf.voteRecv[replyHelper.server] {
+				rf.mu.Unlock()
+				continue
+			}
+
+			if reply.VoteGranted { // in case of dup reply
+				num++
+				if num >= rf.F+1 {
+					//becomes the leader
+					return true
+				}
+			}
+			rf.voteRecv[replyHelper.server] = true
+			rf.mu.Unlock()
+		/*case <-timeout2: //we have a second timeout in case of lost packets.
+		rf.mu.Lock()
+		//rf may not be a candidate any more, we need to check first
+		if rf.state == CANDIDATE && rf.currentTerm == term {
+			rf.SendAllVoteReq()
+		}
+		rf.mu.Unlock()*/
+		case <-timeout:
+			DPrintf(LOG3, rf.me, "Timeout on ASKING for votes")
+			return false 
+		}
+	}
+}
+
 
 // blocking function,
 func (rf *Raft) gatherVote(term int) {
@@ -854,9 +985,23 @@ func (rf *Raft) ticker() {
 			fallthrough // becomes a Candidate
 
 		case CANDIDATE:
+			// Before we add one more term, we make sure we might get a vote
+			// do prevote
+			term := rf.currentTerm
+			rf.voteRecv = make([]bool, rf.F*2+1)
+			rf.SendAllFakeVoteReq()
+			rf.mu.Unlock()
+
+			if !rf.tryGatherVote(rf.currentTerm) {
+				//not ok!
+				time.Sleep(40 * time.Millisecond)
+				continue 
+			}
+
+			rf.mu.Lock()
 			rf.ConvertTo(CANDIDATE) // +1 term
 			DPrintf(LOG1, rf.me, "CANDIDATE ASKS FOR VOTES, term = %v", rf.currentTerm)
-			term := rf.currentTerm
+			term = rf.currentTerm
 			rf.SendAllVoteReq()
 			rf.mu.Unlock()
 			// Candidate, gather votes, will block for random time
@@ -901,6 +1046,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.state = FOLLOWER
 	rf.voteChan = make(chan *RequestVoteReplyHelper)
+	rf.fakeVoteChan = make( chan *RequestVoteReplyHelper)
 	rf.appendChan = make(chan *AppendEntriesReplyHelper)
 	rf.F = len(peers) / 2
 	rf.log = []Log{{}} // Starts from 1
